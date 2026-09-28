@@ -58,7 +58,7 @@
 ## 怎么跑
 
 ```
-node --check <每个 js/、tools/ 文件>     # 见 .github/workflows/ci.yml 的那三条 for 循环
+node --check <每个 js/、tools/ 文件>     # 见 .github/workflows/ci.yml：js/ 与 tools/ 各一条 for 循环，外加 server.cjs
 node tools/rule-test.mjs                # 规则词表与合法盘定义
 node tools/pencil-test.mjs              # 铅笔每条推理对账真值
 node tools/port-check.mjs               # 一次性端口对账，见下

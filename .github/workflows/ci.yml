@@ -104,7 +104,8 @@ jobs:
         # WebSocket/fetch 打 /json/version 拿 webSocketDebuggerUrl，那两个全局只在 node ≥22 存在。
         # 20 上第一条 attach 就抛 "WebSocket is not defined"，整个 job 在任何一条关于游戏的断言
         # 之前就红了 —— 那种红和这个品类没有任何关系。
-        # check job 留在 20 是因为它只跑 node --check 与四道纯 node 闸，那部分不碰 CDP。
+        # check job 留在 20 是因为它只跑 node --check 与三道纯 node 闸（rule-test / pencil-test / balance），
+        # 那部分不碰 CDP。
         with:
           node-version: 22
       # ubuntu-latest 镜像自带 google-chrome 且在 PATH 上，正是 verify.sh 找 Chrome 的候选名之一；
