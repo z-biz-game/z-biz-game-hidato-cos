@@ -72,6 +72,16 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
   ms 与 unknown 都是 0（复跑同一条命令，看每档「击穿 … 按闸」那一行）。
   余量最薄的是 7×7：同一次观测里生产路径单次裁判 ms 中位 0.01 / p95 1.63 / max 4.79，而 `budgetMs=10`。
   慢一倍的机器会真的触发 ms 闸，届时 G2 直接红，那一档必须重测，不许把这里的 10 抄过去当结论。
+  **这件事已经真发生过一次**，在 CI 的 runner 上（node 20）：`tools/pencil-test.mjs` 的证书盘取样红在
+  `produce 7x7#5 :: cert-stopped · 归因=ms nodes=36608 ms=10.08 · 预算 nodeCap=250000/msCap=10 · 线索 16`
+  （那一行原样在 run log 里；同一串 seed 在本机 node 26 的证书裁判是 37239 节点 / 4.15 ms）。
+  两个读数一起说明两件事：runner 的 node 侧裁判大约是这台笔记本的 2.4 倍慢，**而且** carve 的 60 ms 探针
+  在那边放回了不同数量的线索（16 条、36608 节点 vs 37239 节点）—— 同一 seed 在两台机器上本来就不是同一张盘。
+  处置分两条路，一条都没放宽：出货路径继续由 G2 钉"ms 归因 = 0"，那种盘页面**拒收**（`boardIsProven`），
+  没证完的不发货；取样路径（`pencil-test` 要的是"能当证人的证书盘"）允许把"这台机器证不完"记成**缺席**，
+  但每档至多 `floor(SAMPLES/4)` 张、三种去向（入池／赦／红）必须逐档闭合，`cert-multiple` / `cert-none` /
+  归因 `nodes` 一张都不赦。要治红就在那台机器上按第 4 节的口径重测尾巴再回填 `budgetMs`——
+  把 `floor(SAMPLES/4)` 调大不是重测。
 - 跨引擎对账在 `tools/verify.sh` 的 `crossengine` 腿：18 张出货盘指纹（三档各 6 张），
   node 侧由 `tools/playtest.cjs witness` 算，Chrome 侧页面自己算，逐条比。
   本机 2026-09-29 `bash tools/verify.sh` 实测两种形态都是 `matched: "18/18"`、`chromeMsCapBreaches: 0`
@@ -100,7 +110,7 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
 | 闸 | 测什么 | 阴性自证（必须红的那一手） |
 | --- | --- | --- |
 | `tools/rule-test.mjs` | 规则词表与"什么算合法盘"的独立对照：几何、数据形状、`verifyNumbering` 每条违规一个负样本 + 修好它的正样本、端点三态 | 每个负样本都配一条"把缺陷放回去就绿"的对照，斜禁实现/序被动过都会红 |
-| `tools/pencil-test.mjs` | 每条推理都在真值上（`auditAgainst`）、独立见证当证人、七条规则都有出场证人、EXT 不比 BASIC 弱 | 伪造定值 25 次必须全被抓；关掉任意一条规则终局域只能是超集 |
+| `tools/pencil-test.mjs` | 每条推理都在真值上（`auditAgainst`）、独立见证当证人、七条规则都有出场证人、EXT 不比 BASIC 弱；证书盘取样的三种去向（入池／被这台机器的钟赦掉／红掉）逐档必须闭合，且每档被赦的不许超过 `floor(SAMPLES/4)` | 伪造定值 25 次必须全被抓；关掉任意一条规则终局域只能是超集；**同一个进程里**饿 `TIERS` 的档位预算做两把对照：饿 `budgetMs` ⇒ 只出 `STARVED` 并且红在"饿得太多"，压 `nodeCap` ⇒ 一张都不许被赦（归因是 nodes 就红），两把都必须 rc=1 |
 | `tools/port-check.mjs` | 引擎流水线逐字节对回选型屏的 120 张指纹（**本地一次性**，见第 6 节） | 挪动 gap 顺序／洗牌次数／邻接表次序任何一格，指纹就变（条数可能看起来一模一样） |
 | `tools/balance.mjs` | 出货路径的三条承诺 + 定价表：红线 A–I（唯一性、答案独立合法、零猜测、见证一致、证书不可约、铅笔健全、G1/G2/G3 预算与确定性、难度轴单调、`TIERS` 覆盖实测） | `SAMPLES` 改小或 `TIERS` 漂了，I 会红；ms 参与判定，G2 会红 |
 | `tools/verify.sh` | 真 Chrome、真 DOM、真指针、真焦点、真 localStorage、跨引擎指纹：八条腿 × 两形态 | `SABOTAGE=1`（改错期望：crossengine 指纹 / keyboard 轨迹 / resume 假重载 / narrow 的 dpr / canary 少一张负样本）与 `PLANT_TRUTH=1`（当场把真值种进对象图，落盘扫描必须抓）—— 命令组合列在脚本头部注释 |
