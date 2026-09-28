@@ -293,6 +293,9 @@ run_shape() {
 
 cleanup() {
   # 只杀自己起的那几个 pid；别的 agent 的 Chrome / 服务器一律不动。
+  # 看门狗也要在这里杀掉：脚本中途 die 时若留着它，它会在 900s 后拿一份早失效的
+  # pid 表再跑一次 cleanup——那些 pid 号可能已被系统回收给别人。
+  [ -n "${WD:-}" ] && kill "$WD" 2>/dev/null
   [ "${SPID:-0}" != 0 ] && kill $SPID 2>/dev/null
   [ "${PPID2:-0}" != 0 ] && kill $PPID2 2>/dev/null
   stop_chrome
@@ -301,7 +304,9 @@ cleanup() {
 trap cleanup EXIT
 # The watchdog redirects its fds: a background subshell inherits this script's stdout, and
 # inside a pipeline it would hold the write end open long after the tests finished.
-( sleep ${WD_TIMEOUT:-900}; echo "watchdog 到点：闸还没跑完" >&2; cleanup; exit 4 ) </dev/null >/dev/null 2>&1 &
+# WD= inside the subshell: cleanup kills the watchdog, and a watchdog that kills itself would
+# abort its own TERM handler halfway and leave Chrome/servers behind.
+( sleep ${WD_TIMEOUT:-900}; echo "watchdog 到点：闸还没跑完" >&2; WD=; cleanup; exit 4 ) </dev/null >/dev/null 2>&1 &
 WD=$!
 
 cd "$HERE"
@@ -314,6 +319,10 @@ for shape in ${SHAPES:-$SHAPE_LIST}; do
 done
 
 kill $WD 2>/dev/null
+# wait for it: otherwise bash's job control prints "Terminated: 15  ( sleep … )" on stderr
+# right after, and a green run looks like it broke something.
+wait $WD 2>/dev/null
+WD=   # reaped: don't let the EXIT trap kill a pid number that may already belong to someone else
 echo "loadavg（这一跑结束时）：$(sysctl -n vm.loadavg 2>/dev/null || cat /proc/loadavg)"
 echo "chrome: $("$CHROME" --version 2>/dev/null) · node: $(node --version)"
 # 只报这一跑真的跑过的形态：SHAPES=root / BASE_URL= 那种单形态跑，旧文案照样打印"两种 URL 形态"。
