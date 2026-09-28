@@ -82,6 +82,12 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
   但每档至多 `floor(SAMPLES/4)` 张、三种去向（入池／赦／红）必须逐档闭合，`cert-multiple` / `cert-none` /
   归因 `nodes` 一张都不赦。要治红就在那台机器上按第 4 节的口径重测尾巴再回填 `budgetMs`——
   把 `floor(SAMPLES/4)` 调大不是重测。
+  **这条判定接上之后的一次 CI 复跑，runner 上一张都没被赦**：`6dc88f2` 那次 push（CI run 36478620986）
+  的 check job 三档都打「入池 10 + 这台机器证不完 0 + 红掉 0 = 抽样 10」（复跑：push 后读 check job 里
+  「证书盘取样闭合」那三行）。所以 `ms=10.08` 撞 `budgetMs=10` 是同一次 run 的**临界翻转**，不是那个
+  runner 摊上的固定开销——一次复跑既不足以说那条红"已被修好"，也不足以说"证不完 2 张是它的常态"；
+  上限 2 买到的只有"翻车时不必当场改预算"这一件事。同一次 run 里 balance 的 G2 归因 msCap 0 次
+  （三档击穿 1 / 10 / 39 全在 carve、全按 nodes），browser job 两形态各「8/8 legs · 497 checks · 0 failed」。
 - 跨引擎对账在 `tools/verify.sh` 的 `crossengine` 腿：18 张出货盘指纹（三档各 6 张），
   node 侧由 `tools/playtest.cjs witness` 算，Chrome 侧页面自己算，逐条比。
   本机 2026-09-29 `bash tools/verify.sh` 实测两种形态都是 `matched: "18/18"`、`chromeMsCapBreaches: 0`
