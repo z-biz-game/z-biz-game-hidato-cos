@@ -13,7 +13,7 @@
 #   BASE_URL=https://z-biz-game.github.io/z-biz-game-hidato-cos/ bash tools/verify.sh
 #                                              # 部署件：只跑这一种形态，本脚本不起任何服务（归 2e）
 #   SABOTAGE=1 LEGS="crossengine" SHAPES=root bash tools/verify.sh
-#                                              # 闸的阴性自证：把 node 侧期望指纹改错一位，必须红
+#                                              # 闸的阴性自证：把 node 侧期望指纹改错一位，必须红**且 rc≠0**
 #
 # 为什么前缀形态必须单跑一遍而不是写进脚注：根形态是唯一一种能被本地服务器"蒙对"的形态。
 # 页面级 `/js/...` 说明符在仓库=文档根时解得开，挂在 /<repo>/ 下就 404；而抛出来的 dynamic import
@@ -326,7 +326,10 @@ WD=   # reaped: don't let the EXIT trap kill a pid number that may already belon
 echo "loadavg（这一跑结束时）：$(sysctl -n vm.loadavg 2>/dev/null || cat /proc/loadavg)"
 echo "chrome: $("$CHROME" --version 2>/dev/null) · node: $(node --version)"
 # 只报这一跑真的跑过的形态：SHAPES=root / BASE_URL= 那种单形态跑，旧文案照样打印"两种 URL 形态"。
-[ "$SABOTAGE" = 1 ] && { echo "=== 阴性自证这一跑：期望被故意改错，看的是上面有没有 FAIL（红才对） ==="; exit 0; }
-[ "$PLANT_TRUTH" = 1 ] && { echo "=== 阴性自证这一跑：真值被当场种进对象图，看的是扫描有没有抓到（红才对） ==="; exit 0; }
+# 阴性自证也走同一条出口：故意改错期望时这一跑的 **rc 必须非 0**。
+# 这里以前是 `exit 0`，意思是"红由人眼看 FAIL 行"—— 那正好把唯一一条能被 CI 读的信号掐掉了：
+# 一次带 2 条 FAIL 的跑会返回 0，于是"闸会红"这件事从来没被机器证明过。
+[ "$SABOTAGE" = 1 ] && echo "=== 阴性自证这一跑：期望被故意改错，上面必须有 FAIL 且**退出码非 0** ==="
+[ "$PLANT_TRUTH" = 1 ] && echo "=== 阴性自证这一跑：真值被当场种进对象图，上面必须有 FAIL 且**退出码非 0** ==="
 [ $FAILED -eq 0 ] && echo "=== ALL GREEN（这一跑实际覆盖的 URL 形态：${RAN# }）===" || echo "=== FAILURES ABOVE ==="
 exit $FAILED
