@@ -1,0 +1,142 @@
+/* 智渡 Hidato · 纸笔口径：一张纸、一行一句话、格子够大够点。
+   两条被本组织踩过的坑写死在这里：
+     ① 带 display 的区块必须**各自**补一条 [hidden] 规则 —— UA 那条 [hidden]{display:none} 会被
+        作者写的 display:grid/flex 覆盖，于是"藏起来"的面板照样能被 elementFromPoint 命中，
+        指针闸会去怪控件。验收不过时 #board-wrap 与 #palette 要真的收起，所以这里逐个补。
+     ② 390×844 起不许出现横向滚动条：控件行用 flex-wrap，格子边长走 clamp()，
+        面板按钮 minmax(44px,1fr) —— 44px 是本仓认的最小命中盒，窄屏上宁可换行不可缩小。 */
+:root {
+  --ink: #1b1a18;
+  --ink-soft: #5c564d;
+  --paper: #fbf8f2;
+  --paper-alt: #f2ede4;
+  --line: #cfc7b8;
+  --line-bold: #8a8378;
+  --accent: #8a5a2b;
+  --good: #2f6b40;
+  --bad: #b23a30;
+  --focus: #2b6cb0;
+  --hint: rgba(138, 90, 43, .18);
+  --cell: clamp(38px, 11.5vw, 58px);
+  --gap: 4px;
+}
+* { box-sizing: border-box; }
+html, body { max-width: 100%; }
+body {
+  margin: 0;
+  padding: 18px 14px 40px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.6 ui-sans-serif, system-ui, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  overflow-x: hidden;
+}
+header { max-width: 900px; margin: 0 auto 12px; }
+h1 { margin: 0; font-size: 23px; letter-spacing: .04em; }
+h1 small { font-size: 13px; color: var(--ink-soft); font-weight: 400; letter-spacing: .12em; }
+.stage { margin: 6px 0 0; color: var(--ink-soft); font-size: 13px; }
+.stage b { color: var(--accent); }
+main { max-width: 900px; margin: 0 auto; display: block; }
+main[hidden] { display: none; }
+h2 { font-size: 14px; margin: 0 0 6px; letter-spacing: .08em; color: var(--ink-soft); }
+h2 small { font-weight: 400; letter-spacing: 0; color: var(--accent); }
+p { margin: 6px 0; }
+code, kbd { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ── 控件条 ─────────────────────────────────────────────────────────────── */
+.controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  padding: 10px 12px; margin-bottom: 12px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--paper-alt);
+  font-size: 14px;
+}
+.controls[hidden] { display: none; }
+.controls label { display: flex; align-items: center; gap: 6px; }
+.controls select, .controls input {
+  font: inherit; padding: 4px 6px; min-height: 34px;
+  border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--ink);
+}
+.controls input { width: 9ch; }
+.controls button {
+  font: inherit; padding: 6px 14px; min-height: 38px; cursor: pointer;
+  border: 1px solid var(--accent); border-radius: 4px;
+  background: #fff; color: var(--accent);
+}
+.controls button:hover { background: var(--accent); color: #fff; }
+.readouts { display: flex; gap: 10px; color: var(--ink-soft); font-size: 13px; flex-wrap: wrap; }
+.stat { white-space: nowrap; }
+#stat-conflict.bad { color: var(--bad); font-weight: 600; }
+.status { color: var(--ink-soft); font-size: 13px; flex-basis: 100%; }
+
+/* ── 盘面 + 数字面板 ────────────────────────────────────────────────────── */
+.board-wrap { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; margin-bottom: 14px; }
+.board-wrap[hidden] { display: none; }
+.board {
+  display: grid; grid-template-columns: repeat(var(--cols, 5), var(--cell));
+  grid-auto-rows: var(--cell); gap: var(--gap);
+  padding: 8px; margin: 0; background: #fff;
+  border: 1px solid var(--line); border-radius: 6px;
+  touch-action: manipulation;
+}
+.board[hidden] { display: none; }
+.board:focus-visible, .board:focus { outline: 3px solid var(--focus); outline-offset: 2px; }
+.cell {
+  display: flex; align-items: center; justify-content: center;
+  font: 600 clamp(15px, 4.6vw, 22px)/1 ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink); background: var(--paper); cursor: pointer;
+  border: 1px solid var(--line); border-radius: 3px; padding: 0;
+}
+.cell.given { color: var(--ink); background: var(--paper-alt); border-color: var(--line-bold); cursor: default; }
+.cell.filled { color: var(--accent); background: #fff7ee; }
+.cell[data-selected="1"] { outline: 3px solid var(--focus); outline-offset: -1px; }
+.cell[data-conflict="1"] { color: var(--bad); border-color: var(--bad); background: #fff0ee; }
+.cell[data-hint="1"] { box-shadow: inset 0 0 0 3px var(--hint); background: #fdf3e3; }
+.palette-wrap { flex: 1 1 240px; min-width: 200px; }
+.palette-wrap[hidden] { display: none; }
+.palette { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; }
+.palette[hidden] { display: none; }
+.num {
+  min-height: 44px; padding: 4px 2px; cursor: pointer;   /* 44px 是指尖目标的底线：面板是落子的地方，不比格子小 */
+  font: 600 15px/1 ui-sans-serif, system-ui, sans-serif;
+  border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--ink);
+}
+.num:hover { border-color: var(--accent); color: var(--accent); }
+.num[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: #fff; }
+.num.done { color: var(--ink-soft); background: var(--paper-alt); }
+.num[aria-disabled="true"] { color: #b9b1a4; background: #f4f1ea; border-style: dashed; cursor: not-allowed; }
+button:focus-visible, select:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid var(--focus); outline-offset: 1px;
+}
+.kbd { color: var(--ink-soft); font-size: 12px; }
+.kbd kbd { border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; background: #fff; }
+.hint { min-height: 1.6em; font-size: 14px; color: var(--accent); }
+.hint:empty { color: var(--ink-soft); }
+.verdict { font-size: 14px; }
+.verdict[hidden] { display: none; }
+.verdict.ok { color: var(--good); font-weight: 600; }
+.verdict.bad { color: var(--bad); }
+
+/* ── 回执 ───────────────────────────────────────────────────────────────── */
+.side { display: block; margin-bottom: 16px; }
+.side[hidden] { display: none; }
+pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto; max-width: 100%;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* ── 未通过验收 ─────────────────────────────────────────────────────────── */
+.reject { display: grid; gap: 6px; margin-bottom: 16px; padding: 10px 12px; border: 2px solid var(--bad); border-radius: 6px; background: #fff5f3; }
+.reject[hidden] { display: none; }
+.reject h2 { color: var(--bad); }
+
+.save-note { color: var(--ink-soft); font-size: 12px; }
+
+@media (max-width: 520px) {
+  body { padding: 12px 8px 32px; }
+  h1 { font-size: 20px; }
+  .controls { padding: 8px; gap: 6px 8px; }
+  .controls button { padding: 6px 10px; min-height: 44px; }   /* 窄屏下动作键也不低于 44px 的指尖目标 */
+  :root { --cell: clamp(34px, 11.2vw, 46px); --gap: 3px; }
+  .board-wrap { gap: 10px; }
+}

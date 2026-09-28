@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智渡 Hidato · 数字链</title>
+<!-- 空 favicon：不给浏览器留一个必然 404 的请求，免得闸的 console 噪音盖掉真错误 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'/%3E">
+<link rel="stylesheet" href="css/game.css">
+</head>
+<body>
+  <header>
+    <h1>智渡 <small>HIDATO · 数字链</small></h1>
+    <p class="stage">在 <b>R×C</b> 的格子里把 1..n 排成一条链：相邻两个数必须<b>王步相邻</b>（横、竖、斜都算）。
+      每一盘都由 seed 现算，并由裁判穷举<b>证明过唯一解</b>、由铅笔规则<b>证明过不猜也能推完</b>；
+      页面里<b>没有答案字段</b>，提示只念铅笔自己删剩的那些候选。</p>
+  </header>
+
+  <main>
+    <section class="controls" id="controls">
+      <label>档位
+        <select id="tier" aria-label="档位"></select>
+      </label>
+      <label>盘号
+        <input id="seed" type="text" value="h0" spellcheck="false" maxlength="24" aria-label="盘号 seed">
+      </label>
+      <button id="btn-next" type="button">换一局</button>
+      <button id="btn-hint" type="button">提示</button>
+      <button id="btn-undo" type="button">撤销</button>
+      <button id="btn-clear" type="button">清空</button>
+      <button id="btn-judge" type="button">判定</button>
+      <span class="readouts">
+        <span id="stat-filled" class="stat">已填 0/0</span>
+        <span id="stat-steps" class="stat">0 手</span>
+        <span id="stat-conflict" class="stat"></span>
+      </span>
+      <span id="status" class="status"></span>
+    </section>
+
+    <section class="board-wrap" id="board-wrap">
+      <div class="board" id="board" role="grid" tabindex="0"
+           aria-label="数字链棋盘：点一格选中它，再点右侧的数字把它写进去"></div>
+      <div class="palette-wrap">
+        <h2>数字面板 <small id="armed-note"></small></h2>
+        <div class="palette" id="palette" role="group" aria-label="数字面板：1 到 n"></div>
+        <p class="kbd">键盘：<kbd>←↑→↓</kbd> 移选中格 · <kbd>+</kbd>/<kbd>=</kbd> 加一 · <kbd>-</kbd> 减一 ·
+          <kbd>⌫</kbd> 清空这格 · <kbd>Tab</kbd> 到面板后 <kbd>Enter</kbd>/<kbd>空格</kbd> 落子。
+          印着的格与 1、n 两个端点不能改。</p>
+        <p id="hint" class="hint" role="status"></p>
+        <p id="verdict" class="verdict" hidden></p>
+      </div>
+    </section>
+
+    <section class="side">
+      <h2>这一盘的来历（引擎自己记的账）</h2>
+      <pre id="receipt"></pre>
+    </section>
+
+    <section class="reject" id="reject" hidden>
+      <h2>本盘未通过验收</h2>
+      <p>下面这几条只要有一条不认，这张盘就不是货 —— 页面不会把<b>未证明唯一</b>或<b>铅笔推不完</b>的盘当题面发出去。</p>
+      <pre id="reject-detail"></pre>
+    </section>
+
+    <footer>
+      <p id="save-note" class="save-note"></p>
+    </footer>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
