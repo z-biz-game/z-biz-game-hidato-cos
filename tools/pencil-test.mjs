@@ -27,7 +27,9 @@
 //                      红法：铅笔强到把不可约盘全推完（门槛恒真 ⇒ "零猜测"没有内容）、
 //                      或出货器改了密度梯导致某张出货盘推不完（承诺破口）。
 //   §5 强度对照  EXT 的推完率 ≥ BASIC、且**不存在** BASIC 推得完而 EXT 推不完的盘；
-//                      EXT 的终局域 ⊆ BASIC。EXT 的独立权力用两条会被推翻的读数钉：
+//                      EXT 的终局域 ⊆ BASIC；"不变宽"钉到格：加规则后多推完的张数必须为 0
+//                      （真盘 60 + 合成抽样 180 + 3×3 全枚举 511 种印法，三条口径都是 0，实测值
+//                      打印在 §5 的读数行里）。EXT 的独立权力用两条会被推翻的读数钉：
 //                      合成盘上 EXT 终局**严格更小**的张数 ≥1、收敛轮数严格更少的张数 ≥1。
 //                      "EXT 比 BASIC 多推完几张"在本品类量出来是 0（真盘 60 + 合成 180 + 3×3 全枚举
 //                      511 种印法三条口径都是 0，读数打印出来，不写成断言 —— 见该节口径说明）。
@@ -138,6 +140,7 @@ console.log('');
 console.log('── §2 soundness（对全部解 · 独立见证 witness.js 当证人）──');
 {
   let covered = 0, over = 0, ghostSolved = 0, falseDead = 0, capped = 0, tooMany = 0, runs = 0;
+  let solChecked = 0, witnessFake = 0;
   const outcomeRead = { unique: 0, multiple: 0, none: 0 };
   for (const [R, C, reps, dens] of [[3, 3, 150, 0.30], [4, 4, 150, 0.32], [5, 5, 90, 0.30]]) {
     const G = buildGrid(R, C), n = R * C;
@@ -156,9 +159,13 @@ console.log('── §2 soundness（对全部解 · 独立见证 witness.js 当�
       if (w.count === 0) continue;
       covered++;
       const reachLo = new Uint32Array(n), reachHi = new Uint32Array(n);
-      for (const sol of w.solutions) for (let v = 1; v <= n; v++) {
-        const c = sol[v];
-        if (v <= 32) reachLo[c] |= 1 << (v - 1); else reachHi[c] |= 1 << (v - 33);
+      for (const sol of w.solutions) {
+        if (verifyNumbering(G, g, Int32Array.from(sol)) !== 'ok') witnessFake++;   // 证人自己得先合法
+        solChecked++;
+        for (let v = 1; v <= n; v++) {
+          const c = sol[v];
+          if (v <= 32) reachLo[c] |= 1 << (v - 1); else reachHi[c] |= 1 << (v - 33);
+        }
       }
       for (const spec of ['BASIC', 'EXT']) {
         runs++;
@@ -172,6 +179,8 @@ console.log('── §2 soundness（对全部解 · 独立见证 witness.js 当�
       }
     }
   }
+  ok('证人先自证合法：见证 B 交回的每一条解都过 rules.js 的 verifyNumbering', witnessFake === 0,
+    `${solChecked} 条见证解里 ${witnessFake} 条非法（若 >0，本节下面的 reach⊆dom 就是在拿假解对账）`);
   ok(`${covered} 张随机 CSP × ${runs / 2 | 0} 组：铅笔一次都没删掉"某个解里成立"的取值`, over === 0,
     `越权删位 ${over} · 可比 ${covered}（unique ${outcomeRead.unique} / multiple ${outcomeRead.multiple}）· 见证掐断 ${capped} · 解多于 64 而弃 ${tooMany}`);
   ok('铅笔宣布推完 ⇒ 见证必须说 unique（多解盘上不可能不猜就定完整张盘）', ghostSolved === 0, `假推完 ${ghostSolved} 次`);
@@ -378,6 +387,18 @@ console.log('── §7 负对照：矛盾题面与伪造结论都必须被抓 �
   eq('夹具自查：这一张确实是 givenConflict 说的 given-adjacency', givenConflict(G, far), 'given-adjacency');
   const farRef = countSolutions(G, far, {});
   eq('独立通道（裁判）也说这盘无解，且 reason 与 givenConflict 逐字相同', `${farRef.outcome}/${farRef.reason}`, 'none/given-adjacency');
+  // 同一道题在 3×3 上做小盘版，好让**两条零传播见证**都能给读数（5×5 上见证 A 只会 stopped）：
+  // 见证 B 过去不在"两个都印着的连续数字"之间查邻接（gap 枚举只查贴锚那一步），
+  // 于是它会把这盘数成 multiple，甚至数成 unique —— 假证书。b11bb89 修掉，这里钉住不许回退。
+  const G3x = buildGrid(3, 3);
+  const far3 = new Int32Array(10).fill(-1); far3[1] = 0; far3[2] = 8; far3[6] = 4;
+  eq('夹具自查（3×3 小盘版）：DIST((0,0),(2,2))=2 ⇒ givenConflict 报 given-adjacency', givenConflict(G3x, far3), 'given-adjacency');
+  eq('同一道题的四个通道同读数：裁判 / 见证 A / 见证 B 都说 none，且 reason 用 rules.js 的词表', (() => {
+    const ref = countSolutions(G3x, far3, {});
+    const a = countWitnessA(G3x, far3, { limitSolutions: 4 });
+    const b = countWitnessB(G3x, far3, { limitSolutions: 4 });
+    return `${ref.outcome}/${ref.reason}|${a.outcome}/${a.stopped}|${b.outcome}/${b.reason}`;
+  })(), 'none/given-adjacency|none/false|none/given-adjacency');
   const SPECS = [...STRENGTHS, ['R2'], ['R3'], ['R4'], ['R5'], ['R6'], ['R2', 'R3']];
   let farSolved = 0;
   const farReads = [];
