@@ -7,8 +7,10 @@
 //   prefix  http://127.0.0.1:5501/z-biz-game-hidato-cos/            (PREFIX=/z-biz-game-hidato-cos)
 // The prefix shape is the only one that catches page-level absolute specifiers, so it is a real
 // mode here rather than a footnote — a local server can guess its way through root mode and still
-// 404 in production. With PREFIX set, a bare "/" is answered by a redirect into the prefix, so the
-// browser always ends up on the shape production will actually serve.
+// 404 in production. In prefix mode a bare "/" is a 404 that *names* the required shape, and
+// "/z-biz-game-hidato-cos" (no trailing slash) 301s to "/z-biz-game-hidato-cos/". The bare "/" is
+// deliberately not redirected: a prefix-mode server that answers "/" would let a gate leg wired to
+// the wrong shape pass anyway, which is the one failure mode this second mode exists to catch.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
