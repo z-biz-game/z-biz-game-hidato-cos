@@ -98,7 +98,17 @@ for (const tier of TIERS) {
   for (let i = 0; i < SAMPLES; i++) {
     const p = produce(tier.key, i, { confirm: false });
     if (p.ok) IRR.push({ tier, G, given: p.board.given, sol: p.solution, seed: p.seed, board: p.board });
-    else { fails++; checks++; console.log(`  FAIL produce ${tier.key}#${i} :: ${p.fail}`); }
+    else {
+      fails++; checks++;
+      // 红了必须当场说清是"这台机器证不完"还是"这张题面根本不唯一"：这两件事的处置完全不同
+      // （前者重测预算，后者是引擎/裁判坏了）。线索数也打出来——机器不同时 carve 的 ms 探针会
+      // 放回头像不同的线索，题面形状本来就会变，只打 fail 会把这件事藏起来。
+      const r = p.board && p.board.ref;
+      console.log(`  FAIL produce ${tier.key}#${i} :: ${p.fail}` +
+        (r ? ` · 裁判 outcome=${r.outcome} 归因=${r.stoppedBy} nodes=${r.nodes} ms=${r.ms.toFixed(2)}` : '') +
+        ` · 预算 nodeCap=${tier.nodeCap}/msCap=${tier.budgetMs} carve=${tier.carve.nodeCap}/${tier.carve.msCap}ms` +
+        (typeof p.givens === 'number' ? ` · 线索 ${p.givens}` : '') + ` · draws=${p.draws}`);
+    }
     const g = generate(tier.key, 4000 + i);
     if (g.ok) SHIP.push({ tier, G, given: g.ship.given, sol: g.solution, seed: g.seed });
     else { fails++; checks++; console.log(`  FAIL generate ${tier.key}#${4000 + i} :: ${g.fail}`); }

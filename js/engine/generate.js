@@ -465,8 +465,16 @@ export function produce(tierKey, seed, opts = {}) {
     confirm: opts.confirm ?? true, acc: opts.acc,
   });
   if (b.fail) return { ok: false, fail: b.fail, draws: b.draws, tier: tier.key, seed: seedStr, board: b };
+  const ok = provesUnique(b.ref);
   return {
-    ok: provesUnique(b.ref), tier: tier.key, seed: seedStr, board: b,
+    ok, tier: tier.key, seed: seedStr, board: b,
+    // 证不完必须说得出是哪一路、哪一闸：调用方拿到 ok=false 时如果只有一句 "undefined"，
+    // 就没法区分"这台机器慢"（stopped）与"这张题面真的多解"（multiple）—— 前者要重测预算，后者是引擎坏了。
+    // 归因写法与 generateOn 的 'cert-' + outcome 同一份拼写。
+    ...(ok ? {} : {
+      fail: 'cert-' + b.ref.outcome, stoppedBy: b.ref.stoppedBy,
+      refereeNodes: b.ref.nodes, refereeMs: b.ref.ms,
+    }),
     givens: b.survivors.length, draws: b.draws,
     solution: solutionCellOf(b), fingerprint: fingerprint(G, b.given, solutionCellOf(b)),
   };
