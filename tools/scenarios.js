@@ -1,12 +1,18 @@
 // 浏览器闸跑在页面里的场景：注入后由 tools/playtest.cjs 的 `scenario|interact <名>` 调 window.__scn.<名>()。
 //
-// 本回合五条腿（简报的验收合同）：
+// 本回合七条腿（简报的验收合同；verify.sh 的清单里 boot 跑两种 URL ⇒ 共八段）：
 //   · boot        场景 A · 启动与"页面里没有答案"（含 URL 定盘、msCap=0 证人、真值扫描）
 //   · crossengine 场景 C · 18 张出货盘的**跨引擎指纹对账**（页侧收集，node 侧逐条比）
 //   · pointer     场景 B · CDP 真指针把一张 5×5 走完（多回合：页面交坐标，node 去点）
 //   · keyboard    场景 D · **真键盘通道**（CDP Input.dispatchKeyEvent；页面一个 hidato.press() 都不调）
 //   · resume      场景 E · 跨**真刷新**续玩（Page.reload；刷新前证人由 node 取走再送回来）
-// canary 腿 / 移动端腿归下一条回合（2e），这里**没有半成品**。
+//   · narrow      场景 F · **窄屏腿**：视口/dpr 覆写发生在这一腿自己的那次调用里（attach 后、导航前），
+//                  再把 innerWidth/innerHeight/devicePixelRatio/clientWidth 读回来自证，逐格量命中盒
+//   · canary      场景 G · **拒盘腿**：五张 node 算好的负样本灌进 gate.loadBoard，逐条证明页面的
+//                  拒绝分支（铅笔推不完 / nodeCap 掐停 / count!==1 / given-adjacency / 端点没印全）
+//                  在浏览器里到得了；stopped 那张只用 nodeCap 造，绝不碰 msCap
+// 判定用的读数一律留在 stdout 里；墙上时钟那类（timeOrigin / 耗时 / 需要滚动几个控件）以 `_`前缀
+// 交回——它们进 .extra.json 供复验，但不进可 diff 的那条通道，否则"连跑两次逐字节相同"永远做不到。
 //
 // 规矩与兄弟仓同名同姓，内容是本仓自己的：
 //   * 一条断言只写一次 `ck(名, 条件, 细节)`，机器可读的 `RESULT <json>` 由 playtest.cjs 打在 stdout
@@ -346,9 +352,14 @@
     return report({
       shape: location.href, href: location.href, baseURI: document.baseURI,
       tier: st.tier, seed: st.seed, fingerprint: st.fingerprint,
-      timeOrigin: H().doc.timeOrigin, bfsNodes: scan.nodes, domNodes: scan.domNodes,
-      domHandleWhitelist: scan.allowed, chromeRefereeMaxMs: st.proof ? Number(st.proof.refereeMaxMs.toFixed(3)) : null,
-      nodeRefereeMaxMs: Number(E.maxMs.toFixed(3)), budgetMs: E.budgetMs, msCapBreaches: rw.breachMs,
+      // 下面三个是**墙上时钟读数**（文档的 timeOrigin、裁判耗时、node 侧耗时），不参与任何判定：
+      // 判定用的是 msCapBreaches（击穿次数，恒为 0 才是绿）与上面那几条扫描行。
+      // 与 resume 腿的 _timeOriginBefore/After、窄屏腿的 _scrollHeight 同一处理：留在 .extra.json 供复验，
+      // 不进 stdout —— 否则"同一条命令连跑两次逐字节 diff 为空"这一条判据永远做不到。
+      _timeOrigin: H().doc.timeOrigin, bfsNodes: scan.nodes, domNodes: scan.domNodes,
+      domHandleWhitelist: scan.allowed,
+      _chromeRefereeMaxMs: st.proof ? Number(st.proof.refereeMaxMs.toFixed(3)) : null,
+      _nodeRefereeMaxMs: Number(E.maxMs.toFixed(3)), budgetMs: E.budgetMs, msCapBreaches: rw.breachMs,
     });
   };
 
@@ -403,9 +414,11 @@
     return report({
       boards: samples.length, perTier,
       chromeMsCapBreaches: msCapBreaches, chromeNodeCapBreaches: nodeCapBreaches,
-      chromeMaxMs: Number((msList[msList.length - 1] || 0).toFixed(3)),
-      chromeMedianMs: Number((msList[(msList.length - 1) >> 1] || 0).toFixed(3)),
-      href: location.href, timeOrigin: H().doc.timeOrigin,
+      // 同 boot 腿：耗时与 timeOrigin 是这台机器的读数，判定看的是上面那两个击穿计数。
+      _chromeMaxMs: Number((msList[msList.length - 1] || 0).toFixed(3)),
+      _chromeMedianMs: Number((msList[(msList.length - 1) >> 1] || 0).toFixed(3)),
+      _timeOrigin: H().doc.timeOrigin,
+      href: location.href,
       nodeWitness: 'crossEngineFingerprints', samples,
     });
   };
@@ -1065,5 +1078,444 @@
     return out;
   };
 
-  w.__scn = { boot, crossengine, pointer, keyboard, resume };
+  // ==================================================== 场景 F · 真窄屏 / 移动端（窄屏腿）
+  /**
+   * 这一腿存在的理由是这个家族踩过的那颗假绿：兄弟仓的"移动腿"**先起一个进程设
+   * Emulation.setDeviceMetricsOverride 就退出**，再另起进程跑场景 ⇒ 跑断言的那个进程从没被覆写，
+   * 在 vw 1280 / narrow=false 下把桌面那套断言又跑一遍，报出与桌面腿相同的条数。
+   * 所以这里三条缺一不可：
+   *   ① 覆写发生在**这条腿自己那一次 playtest 调用**里（attach 之后、首次导航之前，同一个 session）；
+   *   ② 腿内把 vw/dpr/clientWidth 读回来**当成断言**（不是装饰）：读数和请求的尺寸不符 ⇒ 腿红；
+   *   ③ 断言本身是窄屏形状（横向溢出 / 命中盒 / 重排证人 / 44px 指尖目标），条数与桌面腿不可能相同。
+   * 期望的 (W, H, D, mobile) 由 verify.sh 写进 node 证人的 JSON 里带进来：页内读不到 env，
+   * 而"请求了什么"必须与"量到了什么"逐条对上，否则覆写有没有生效没人知道。
+   */
+  const NARROW_TIERS = ['5x5', '6x6', '7x7'];
+  const rectOverlap = (a, b) => {
+    const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return (w > 0 ? w : 0) * (h > 0 ? h : 0);
+  };
+
+  const narrow = async () => {
+    const E = exp();
+    ck('窄屏腿的期望（出货盘 + 请求的视口三元组）由 node 侧带进来（缺了就必须红）',
+      !!E && E.ok === true && Number.isInteger(E.vwWant) && Number.isInteger(E.dprWant),
+      String(w.__expectRaw).slice(0, 160));
+    if (!E || !E.ok) return report({ href: location.href });
+    const W = E.vwWant, Hh = E.vhWant, Dp = E.dprWant;
+    const vw = w.innerWidth, vh = w.innerHeight, dpr = w.devicePixelRatio;
+    const cw = document.documentElement.clientWidth;
+
+    // ① 覆写证人：这四对读数就是"覆写在这条腿自己的调用里生效"的证人。
+    eq('覆写证人 1/5 innerWidth = 请求的窄屏宽度（桌面腿读到的是 Chrome 窗口宽 1280）', vw, W);
+    eq('覆写证人 2/5 devicePixelRatio = 请求的 dpr（现成 VIEWPORT=WxH 写死 1，这一条要求它带得出 D）', dpr, Dp);
+    eq('覆写证人 3/5 documentElement.clientWidth = 请求的宽度', cw, W);
+    eq('覆写证人 4/5 innerHeight = 请求的高度', vh, Hh);
+    ck('覆写证人 5/5 请求的不是桌面那一对（W≠1280 或 D≠1）——否则这条腿就是在重跑桌面断言',
+      W !== 1280 || Dp !== 1, `请求 ${W}×${Hh}×${Dp}`);
+
+    // ② CSS 侧的证人：窄屏那条 media query（max-width:520px）命中，桌面那条（min-width:901px）不命中。
+    //    这两条在 1280×1024 的桌面配置上是**反的**，所以它们不是白断言（本仓 css/game.css 末尾那个 @media）。
+    const mq = (q) => w.matchMedia(q).matches;
+    eq('窄屏 media query (max-width:520px) 命中（样式真的按窄屏那套在算，不是只换了个窗口）', mq('(max-width: 520px)'), 'true');
+    eq('桌面 query (min-width:901px) 不命中（同一句话在桌面配置上必红）', mq('(min-width: 901px)'), 'false');
+
+    // ③ 起步：这一腿开的是**最宽的一档**（溢出风险最大），且必须是 node 证人那张盘。
+    const st0 = S();
+    ck('窄屏腿起步就是证人那张盘（state() 有读数）', !!st0, 'null');
+    if (!st0) return report({ href: location.href });
+    eq('起步档位 = 窄屏腿指定的那一档（最宽 = 溢出风险最大）', `${st0.tier}/${st0.seed}`, `${E.tier}/${E.seed}`);
+    eq('起步出货盘指纹 = node 侧 witness（窄屏腿跑的是真货盘，不是空页面）', st0.fingerprint, E.fingerprint);
+
+    // ④ 逐档量：横向不溢出 + 格数对得上 + 页面自己的验收仍通过。
+    const perTier = {};
+    for (const tk of NARROW_TIERS) {
+      H().open(tk, E.seed, false);
+      await wait(0);
+      const st = S();
+      const tier = H().tiers.find((t) => t.key === tk);
+      const cells = document.querySelectorAll('#board [data-cell]');
+      const de = document.documentElement;
+      ck(`${tk} 在窄屏上仍通过页面自己的验收（proven=true）`, !!st && st.proven === true, st ? `proven=${st.proven}` : 'state() 为空');
+      eq(`${tk} 的格子节点数 = 档位表里的 n（盘画全了才谈得上溢出）`, cells.length, tier.n);
+      ck(`${tk} 盘不横向溢出：documentElement.scrollWidth <= clientWidth + 1`,
+        de.scrollWidth <= de.clientWidth + 1, `scrollWidth=${de.scrollWidth} clientWidth=${de.clientWidth}`);
+      ck(`${tk} body 也不横向溢出（scrollWidth <= 请求宽度 + 1）`,
+        document.body.scrollWidth <= W + 1, `body.scrollWidth=${document.body.scrollWidth} 请求宽度=${W}`);
+      perTier[tk] = `${cells.length} 格 · dsw ${de.scrollWidth}/${de.clientWidth} · 格宽 ${
+        (cells[0] ? cells[0].getBoundingClientRect().width.toFixed(2) : '—')}px`;
+    }
+    // 逐档量完之后**再开一次最宽那一档**：view.build 每次换档都重建节点，
+    // 后面的逐格命中/几何必须对着一张刚建好、且确定是这一档的盘量。
+    H().open(E.tier, E.seed, false);
+    await wait(0);
+    const tierW = H().tiers.find((t) => t.key === E.tier);
+    const g = { tk: E.tier, tier: tierW, cells: Array.from(document.querySelectorAll('#board [data-cell]')) };
+    ck(`换回最宽那一档（${E.tier}）之后格子节点数 = 档位表的 n`, g.cells.length === tierW.n, `${g.cells.length} vs ${tierW.n}`);
+    const board = $('#board');
+    // 命中盒要先滚得到才谈得上点得动（窄屏第一屏放不下整张盘，这本身就是窄屏的形状）。
+    board.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await wait(0);
+    const se = document.scrollingElement || document.documentElement;
+    ck('窄屏页面**纵向可滚**（scrollHeight > innerHeight ⇒ 下面的命中不是白断言）',
+      se.scrollHeight > w.innerHeight + 1, `scrollHeight=${se.scrollHeight} innerHeight=${w.innerHeight}`);
+    const inView = g.cells.filter((el) => {
+      const r = el.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      return !(x >= 0 && y >= 0 && x <= vw + 0.5 && y <= vh + 0.5);
+    });
+    ck(`把盘滚进视野之后 ${g.tier.n} 格的中心全部落在窄屏视口内（先证明到得了）`, inView.length === 0,
+      `${inView.length} 格在外面 · 视口 ${vw}×${vh}`);
+    // 逐格：中心点 elementFromPoint 落回**自己那格**（复用 hitSelf，逐格交条数）。
+    let cellBad = 0;
+    for (let c = 0; c < g.tier.n; c++) {
+      const el = document.querySelector(`#board [data-cell="${c}"]`);
+      const why = el ? hitSelf(el) : '节点不存在';
+      if (why) cellBad++;
+      ck(`窄屏第 ${c} 格的可点命中盒落在自己那格里（${why || '中心点命中自己'}）`, why === '', why);
+    }
+    ck(`${g.tier.n} 格逐格命中盒对完：不合 0 格（窄屏下没被遮挡、也没掉出视口）`, cellBad === 0, `${cellBad} 格不合`);
+    const cellRects = Array.from(g.cells).map((el) => el.getBoundingClientRect());
+    const minCell = Math.min.apply(null, cellRects.map((r) => Math.min(r.width, r.height)));
+    ck(`${g.tier.n} 格的边长都不低于 CSS clamp 的下限 34px（纸笔可读性）`, minCell >= 34, `最小边长 ${minCell.toFixed(2)}px`);
+
+    // 面板：先量几何（不需要在屏上），再把面板滚进视野逐枚命中。
+    const nums = document.querySelectorAll('#palette button[data-value]');
+    const numBad = Array.from(nums).filter((el) => {
+      const r = el.getBoundingClientRect();
+      return !(r.width >= 43.5 && r.height >= 44);
+    });
+    ck(`${nums.length} 枚面板钮的矩形都不小于 44px 指尖底线（CSS .num 的 min-height:44px）`,
+      numBad.length === 0, `${numBad.length} 枚偏小 · 首枚 ${nums.length ? nums[0].getBoundingClientRect().width.toFixed(2) : '—'}px`);
+    $('.palette-wrap').scrollIntoView({ block: 'center', inline: 'nearest' });
+    await wait(0);
+    const pickIdx = [0, Math.floor(nums.length / 3), Math.floor(nums.length / 2), Math.floor(2 * nums.length / 3), nums.length - 1];
+    for (const i of pickIdx) {
+      const el = nums[i];
+      const why = el ? hitSelf(el) : '节点不存在';
+      ck(`面板抽样第 ${i} 枚（值 ${el ? el.dataset.value : '?'}）中心点命中自己`, why === '', why);
+    }
+
+    // 控件仍可点（判定/提示/换一局/档位/盘号 + 撤销/清空）：逐个交条数。
+    // 窄屏第一屏放不下"盘 + 面板 + 控件条"，所以命中前先把**这一个**控件滚进视野：
+    // 这一腿要证的不是"它一屏内可见"，而是"用户滚得到它、滚到之后中心点命中它自己、且它没横向跑出屏宽"。
+    const ctls = [['#btn-judge', $('#btn-judge')], ['#btn-hint', $('#btn-hint')], ['#btn-next', $('#btn-next')],
+      ['#btn-undo', $('#btn-undo')], ['#btn-clear', $('#btn-clear')], ['#tier', $('#tier')], ['#seed', $('#seed')]];
+    let ctlScrolled = 0;
+    let ctlBad = 0;
+    const ctlOutside = [];
+    for (const [nm, el] of ctls) {
+      if (!el) { ck(`窄屏下控件 ${nm} 仍点得到（中心点命中自己）`, false, '节点不存在'); continue; }
+      const r0 = el.getBoundingClientRect();
+      const cy = r0.top + r0.height / 2;
+      const needed = cy < 0 || cy > vh;
+      if (needed) { el.scrollIntoView({ block: 'center', inline: 'nearest' }); await wait(0); ctlScrolled++; }
+      const r1 = el.getBoundingClientRect();
+      if (r1.left < -0.5 || r1.right > cw + 0.5) ctlOutside.push(`${nm} ${r1.left.toFixed(1)}..${r1.right.toFixed(1)}`);
+      const why = hitSelf(el);
+      if (why) ctlBad++;
+      ck(`窄屏下控件 ${nm} 仍点得到（需要时先滚进视野 ⇒ 中心点命中自己）`, why === '', `${why || '命中'}${needed ? ' · 需滚动' : ' · 第一屏内'}`);
+    }
+    ck('每个控件滚进视野后都还在窄屏宽度之内（左右边不出 0..clientWidth ⇒ 没有横向逃出去的那一个）',
+      ctlOutside.length === 0, `${ctlOutside.length} 个越界 · ${ctlOutside.slice(0, 3).join(' ')}`);
+    const ctlSmall = ctls.slice(0, 5).filter(([, el]) => el.getBoundingClientRect().height < 44);
+    ck('窄屏下动作键（判定/提示/换一局/撤销/清空）高度不低于 44px（@media 里那条 min-height:44px）',
+      ctlSmall.length === 0, ctlSmall.map(([nm]) => nm).join(' '));
+
+    // 盘与面板不互相遮挡 + 重排证人（这一条在桌面配置上是**反的**：桌面是并排，窄屏必须换行）。
+    const boardWrap = $('#board-wrap');
+    const palWrap = $('.palette-wrap');
+    board.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await wait(0);
+    const bRect = board.getBoundingClientRect(), pRect = palWrap.getBoundingClientRect();
+    eq('盘与面板的矩形相交面积 = 0（窄屏下两者不叠在一起）', rectOverlap(bRect, pRect).toFixed(2), '0.00');
+    ck('窄屏确实**重排**了：面板的顶边在盘的底边之下（flex-wrap 换行；桌面 1280 上两者并排 ⇒ 这条必红）',
+      pRect.top >= bRect.bottom - 0.5, `面板 top=${pRect.top.toFixed(2)} / 盘 bottom=${bRect.bottom.toFixed(2)}`);
+    eq('盘与控件条不相交（#board-wrap 与 #controls 的矩形相交 = 0）',
+      rectOverlap(bRect, $('#controls').getBoundingClientRect()).toFixed(2), '0.00');
+    ck('盘的宽度不超过可用宽度（格数 × 格宽塞得下这一档）',
+      bRect.width <= cw - 14, `盘宽 ${bRect.width.toFixed(2)} / clientWidth ${cw}`);
+
+    // 收起态仍是**真**隐藏（[hidden] 被自带 display:grid 盖过那一族 bug 在窄屏同样要断）。
+    H().open(E.tier, E.seed, false);
+    await wait(0);
+    ck('换回证人那张盘之后 #reject 是**真**隐藏（display:none 且 0 个 rect）', hiddenTight('#reject'), whyNotTight('#reject'));
+    ck('#verdict 是**真**隐藏', hiddenTight('#verdict'), whyNotTight('#verdict'));
+    ck('藏起来的 #reject / #verdict 在窄屏上也点不到',
+      [$('#reject'), $('#verdict')].every((el) => unhittable(el) === ''),
+      [$('#reject'), $('#verdict')].map((el) => unhittable(el)).filter(Boolean).join(' · '));
+    ck('#board-wrap 在窄屏上是展开的（有 rect 且 display 不是 none）',
+      shown('#board-wrap') && boardWrap.getClientRects().length > 0, whyNotTight('#board-wrap'));
+
+    // 读数条不溢出容器（字号没缩 ⇒ 文本必须自己换行或被容器接住）。
+    const readouts = [D().filled, D().steps, D().conflict, D().status, D().hintLine, D().saveNote];
+    for (const el of readouts) {
+      ck(`读数条 #${el.id} 不溢出自己那行（scrollWidth <= clientWidth + 1）`,
+        el.scrollWidth <= el.clientWidth + 1, `scrollWidth=${el.scrollWidth} clientWidth=${el.clientWidth} 文本「${text(el).slice(0, 28)}」`);
+    }
+    const readoutsFit = readouts.every((el) => el.scrollWidth <= el.clientWidth + 1);
+    const receiptFits = D().receipt.scrollWidth <= D().receipt.clientWidth + 1;
+    ck('#receipt 那块没有横向溢出（pre 自带 overflow-x:auto + white-space:pre-wrap ⇒ 它自己啃得下）',
+      receiptFits, `${D().receipt.scrollWidth}/${D().receipt.clientWidth}`);
+
+    // 收尾：窄屏腿也开过盘（persist 会写档），谁写的档谁收尾。
+    const wiped = H().gate.wipeSave();
+    ck('窄屏腿收尾把档清掉（三条 open 都写过档 ⇒ 不留给下一条腿）', wiped === null, String(wiped));
+
+    const cellW = cellRects.length ? cellRects[0].width : 0;
+    return report({
+      vw, vh, dpr, clientWidth: cw, scrollWidth: document.documentElement.scrollWidth,
+      wantViewport: `${W}x${Hh}x${Dp}`, mobileEmulation: E.mobileWant === true,
+      breakpointHit: mq('(max-width: 520px)'), desktopQueryHit: mq('(min-width: 901px)'),
+      tiers: NARROW_TIERS, perTier, cellsHit: `${g.tier.n - cellBad}/${g.tier.n}`,
+      grid: `${g.tier.n} 格 × ${cellW.toFixed(2)}px`, boardW: Number(bRect.width.toFixed(2)),
+      paletteBelowBoard: pRect.top >= bRect.bottom - 0.5,
+      overlapArea: Number(rectOverlap(bRect, pRect).toFixed(2)),
+      minCellPx: Number(minCell.toFixed(2)), numButtons: nums.length,
+      controlsHittable: `${ctls.length - ctlBad}/${ctls.length}`,
+      readouts: readouts.length, fingerprint: st0.fingerprint, href: location.href,
+      // 判定用的**布尔量**留在 stdout（scrollsVertically / controlsFitWidth），原始时钟/几何读数走 `_`：
+      // 这样"没有任何被判定的东西藏在 _ 键里"与"两次连跑逐字节相同"两条同时成立。
+      scrollsVertically: se.scrollHeight > w.innerHeight + 1,
+      controlsFitWidth: ctlOutside.length === 0, readoutsFit, receiptFitsWidth: receiptFits,
+      _scrollHeight: se.scrollHeight, _receiptScrollWidth: D().receipt.scrollWidth,
+      _controlsNeededScroll: ctlScrolled,
+    });
+  };
+
+  // ==================================================== 场景 G · 拒盘 canary（拒绝分支的浏览器可达性）
+  /**
+   * 这一腿不验"页面能出货"，验的是**页面的拒绝分支在浏览器里真到得了**：
+   * 只跑出货盘的闸永远说不出 stopped / count!==1 / given-adjacency / 端点齐不齐 这几条是不是死代码。
+   * 通道就是页面已经开好的 `gate.loadBoard(tierKey, clues, budget)` 与 `gate.assess(...)`
+   * （第三个参数只给闸用，生产 shipped 路径永远不传 ⇒ 用它把裁判掐停是合法注入，不是改产品）。
+   * 两张通道分工：
+   *   · assess 只现算验收**不换盘** ⇒ 归因对照（同一张题面在生产预算下是绿的，掐停就红 = 预算的锅）；
+   *   · loadBoard 真的换盘 ⇒ 拒绝分支在 DOM 上开火（#reject 展开、#board-wrap 真收起）。
+   * 负样本的题面与期望读数全部由 **node 侧证人**（`node tools/playtest.cjs canary <tier> <seed>`）算，
+   * 页内不现生成一张盘。掐停只用 nodeCap（且 < 256 ⇒ counter.js 里每 256 个节点才查一次的 ms 闸
+   * 结构上到不了）；**绝不用 msCap 造负样本** —— ms 掐停会让盘形跟着机器速度变，那是本组织的红线。
+   */
+  const canary = async () => {
+    const E = exp();
+    ck('canary 腿的五张负样本由 node 侧证人算好交回（页内不现生成盘子）',
+      !!E && E.ok === true && Array.isArray(E.samples) && E.samples.length === 5,
+      String(w.__expectRaw).slice(0, 200));
+    if (!E || !E.ok) return report({ href: location.href });
+    const uniqLine = () => {
+      const t = text(D().receipt);
+      const m = /唯一性\s+(\S+)（count=(-?\d+) · stopped=(true|false) · (\d+) 节点 \/ [\d.]+ ms）/.exec(t);
+      return m ? { outcome: m[1], count: Number(m[2]), stopped: m[3] === 'true', nodes: Number(m[4]) } : null;
+    };
+    const breachLine = () => {
+      const m = /预算击穿\s+nodes (\d+) 次 · ms (\d+) 次/.exec(text(D().receipt));
+      return m ? { nodes: Number(m[1]), ms: Number(m[2]) } : null;
+    };
+    const wiped0 = H().gate.wipeSave();
+    ck('起步先把档清掉（canary 不污染存档：注入前后各 wipe 一次）',
+      wiped0 === null && localStorage.getItem('hidato.save.v1') === null, String(wiped0));
+
+    const reached = {};
+    const reasons = {};
+    const attribution = {};
+    const msSeen = {};
+    let rejectedOpen = 0, boardHiddenTight = 0, provenMatch = 0;
+
+    for (const smp of E.samples) {
+      const tag = `负样本 ${smp.name}`;
+      if (E.canaryDrop === smp.name) {
+        // 阴性自证：这一张**不注入** ⇒ 它的"分支可达"必须红（这一腿最值钱的就是让人看见拒绝分支没被走到）。
+        ck(`${tag}：本轮故意**没注入**这一张（SABOTAGE）⇒ 它那条"拒绝分支在浏览器里可达"必须红`, false,
+          `E.canaryDrop=${E.canaryDrop}：跳过 assess/loadBoard ⇒ ${smp.branch} 这一段在浏览器里没有任何可达性证据`);
+        continue;
+      }
+      const budget = smp.budget || undefined;
+      const exp1 = smp.expect;
+
+      // ── 通道 A：gate.assess（现算验收，不换盘）：页内读数必须逐条等于 node 证人
+      const a = H().gate.assess(smp.tier, smp.clues, budget);
+      msSeen[smp.name] = Number((a.ms || 0).toFixed(3));
+      eq(`${tag} assess：outcome 逐字 = node 侧`, a.outcome, exp1.outcome);
+      eq(`${tag} assess：count = node 侧（多解/掐停那两条读的是这一个数）`, a.count, exp1.count);
+      eq(`${tag} assess：stopped = node 侧`, a.stopped, exp1.stopped);
+      eq(`${tag} assess：stoppedBy 归因 = node 侧`, a.stoppedBy, exp1.stoppedBy);
+      eq(`${tag} assess：nodes = node 侧（节点数是纯函数，node 与浏览器同读数）`, a.nodes, exp1.nodes);
+      eq(`${tag} assess：pencilSolved = node 侧`, a.pencilSolved, exp1.pencilSolved);
+      eq(`${tag} assess：pencilUndecided = node 侧`, a.pencilUndecided, exp1.pencilUndecided);
+      eq(`${tag} assess：endpoints（missingEndpoints）= node 侧`, a.endpoints, exp1.endpoints);
+      eq(`${tag} assess：conflict（givenConflict 原样串）= node 侧`, a.conflict, exp1.conflict);
+      ck(`${tag} assess 的返回里没有 solutions 数组（真值不因注入而进页面）`,
+        !('solutions' in a) && !('solution' in a), JSON.stringify(Object.keys(a)).slice(0, 220));
+
+      // ── 通道 B：gate.loadBoard（真的换盘）⇒ 拒绝分支在 DOM 上开火
+      const out = H().gate.loadBoard(smp.tier, smp.clues, budget);
+      eq(`${tag} loadBoard：页面判定的 proven 与 node 侧同一条谓词（两份拼写在此合流）`, out.proven, exp1.proven);
+      provenMatch++;
+      ck(`${tag} 这一张被页面拒了（proven=false）`, out.proven === false, JSON.stringify(out).slice(0, 200));
+      ck(`${tag} #reject 展开（hidden=false、display 不是 none、有 rect）`,
+        out.rejectedShown === true && D().reject.hidden === false && shown('#reject'), whyNotTight('#reject'));
+      ck(`${tag} #board-wrap **真**收起（hiddenTight：display:none 且 0 个 rect，不是只靠 opacity）`,
+        out.boardHidden === true && hiddenTight('#board-wrap'), whyNotTight('#board-wrap'));
+      ck(`${tag} 面板跟着收起（loadBoard 交回 paletteHidden=true 且 offsetParent 为空）`,
+        out.paletteHidden === true && D().palette.offsetParent === null, `paletteHidden=${out.paletteHidden}`);
+      rejectedOpen++; boardHiddenTight++;
+      const why = text(D().rejectDetail);
+      reasons[smp.name] = why;
+      const detail = `${tag} #reject-detail 念出的 reason 串逐字含 ${exp1.outcome}/${exp1.count}/${exp1.stopped}`;
+      ck(detail, why.indexOf(`outcome=${exp1.outcome} count=${exp1.count} stopped=${exp1.stopped}`) >= 0, why.slice(0, 200));
+      reached[smp.name] = true;
+
+      // ── 每张自己的那一支（具体 reason 串，不许只断"被拒了"）
+      if (smp.name === 'pencil') {
+        ck(`${tag}（BASIC 推不完）：裁判仍证成唯一 —— outcome=unique 且 count=1 且 stopped=false`,
+          exp1.outcome === 'unique' && exp1.count === 1 && exp1.stopped === false,
+          `实测 ${a.outcome}/${a.count}/${a.stopped}`);
+        ck(`${tag} 的红的只有铅笔这一支：reject 里写着「剩 ${exp1.pencilUndecided} 格未定」且端点/题面冲突都是 null`,
+          why.indexOf(`剩 ${exp1.pencilUndecided} 格未定`) >= 0 && why.indexOf('missingEndpoints=null') >= 0 &&
+          why.indexOf('题面冲突=null') >= 0, why.slice(0, 240));
+        // 「能开局」与「能出货」是两个分支：loadBoard 已经把 Game 建起来了（app.game 非空 ⇒
+        // 盘可玩），只是 boardIsProven 不认它（不可出货）。这里当场证一遍两条都到得了。
+        const gm = H().game;
+        ck(`${tag}「能开局」：页面确实把这张盘建出来了（Game 在场、${gm ? gm.n : 0} 个格子节点在 DOM 里）`,
+          !!gm && document.querySelectorAll('#board [data-cell]').length === gm.n,
+          gm ? `n=${gm.n} 节点 ${document.querySelectorAll('#board [data-cell]').length}` : 'app.game 为空');
+        const openCell = (() => {
+          if (!gm) return -1;
+          for (let c = 0; c < gm.n; c++) {
+            const el = document.querySelector(`#board [data-cell="${c}"]`);
+            if (el && el.dataset.given !== '1') return c;
+          }
+          return -1;
+        })();
+        const openVal = (() => {
+          if (!gm) return -1;
+          const gv = new Set();
+          for (const el of document.querySelectorAll('#board [data-given="1"]')) gv.add(Number(el.dataset.value));
+          for (let v = 1; v <= gm.n; v++) if (!gv.has(v)) return v;
+          return -1;
+        })();
+        const placed = H().place(openCell, openVal);
+        ck(`${tag}「能开局」：落子通道可用 —— place(非给定格 ${openCell}, 未印的数 ${openVal}) 交回 ok=true（可玩 ≠ 可出货）`,
+          !!placed && placed.ok === true, `place(${openCell},${openVal}) → ${JSON.stringify(placed)}`);
+        ck(`${tag}「不能出货」的读数落在"需要猜"那一侧：Game 自己的铅笔 solved=false 且 undecided>0（页面现算，不是 node 给的）`,
+          !!gm && gm.pencil.solved === false && gm.pencil.undecided > 0,
+          gm ? `solved=${gm.pencil.solved} undecided=${gm.pencil.undecided}` : '无 Game');
+        attribution[smp.name] = 'pencilSolved=false（裁判 count=1）';
+      }
+      if (smp.name === 'stopped') {
+        ck(`${tag} 归因是 nodes 不是 ms：stoppedBy='nodes' 且注入的预算里根本没有 msCap（红线：绝不用 msCap 造负样本）`,
+          a.stoppedBy === 'nodes' && !!budget && budget.nodeCap > 0 && budget.msCap === undefined,
+          `stoppedBy=${a.stoppedBy} budget=${JSON.stringify(budget)}`);
+        ck(`${tag} nodeCap < 256 ⇒ counter.js 里每 256 个节点才查一次的 ms 闸在这张负样本上结构上到不了`,
+          budget.nodeCap < 256, `nodeCap=${budget.nodeCap}`);
+        eq(`${tag} msCap 用的就是生产档位值（闸没为了让它停而把 ms 调小）`, out.budget.msCap, E.budgetMs);
+        eq(`${tag} nodeCap 用的就是注入的那一个`, out.budget.nodeCap, budget.nodeCap);
+        ck(`${tag} 掐停时 count 不是"唯一"的读数：count=${a.count} 且页面不许把它当货`, a.count !== 1 || a.stopped === true,
+          `count=${a.count} stopped=${a.stopped}`);
+        const u = uniqLine();
+        ck(`${tag} 收据「唯一性」那一行在，且写的就是 stopped=true / ${a.nodes} 节点（预算击穿的现场读数）`,
+          !!u && u.outcome === 'stopped' && u.stopped === true && u.nodes === a.nodes, JSON.stringify(u));
+        const br = breachLine();
+        ck(`${tag} 收据上「预算击穿 nodes a 次 · ms b 次」那一行也在（注入盘走 assessBoard ⇒ 两个生成侧计数器恒 0；` +
+          '这一条断的是"这行字在且解析得开"，本次掐停的归因在上一条 stoppedBy=nodes）',
+          !!br && br.nodes === 0 && br.ms === 0, JSON.stringify(br));
+        // 归因对照：同一张题面、生产预算 ⇒ 页面/ node 都认它是货。红的只有"预算"这一个自变量。
+        const ctrl = smp.fullBudgetControl;
+        const ca = H().gate.assess(smp.tier, smp.clues);
+        ck(`${tag} 对照：同一张题面在**生产预算**下是绿的（node 侧 unique/count=1/pencilSolved/端点齐/无冲突）`,
+          ctrl.outcome === 'unique' && ctrl.count === 1 && ctrl.pencilSolved === true &&
+          ctrl.endpoints === null && ctrl.conflict === null && ctrl.proven === true, JSON.stringify(ctrl).slice(0, 200));
+        ck(`${tag} 对照：页内现算的那一遍与 node 侧逐条相同（掐停是预算的锅，不是两张盘）`,
+          ca.outcome === ctrl.outcome && ca.count === ctrl.count && ca.nodes === ctrl.nodes &&
+          ca.pencilSolved === ctrl.pencilSolved && ca.stopped === false,
+          `页面 ${ca.outcome}/${ca.count}/${ca.nodes}/${ca.pencilSolved}/${ca.stopped} vs node ${ctrl.outcome}/${ctrl.count}/${ctrl.nodes}/${ctrl.pencilSolved}/false`);
+        attribution[smp.name] = `stopped=true/stoppedBy=nodes（nodeCap ${budget.nodeCap} ⇒ nodes ${a.nodes}）`;
+      }
+      if (smp.name === 'multiple') {
+        ck(`${tag} 不唯一这一支：outcome=multiple 且 count=${a.count}≠1（数到第二个就收工）`,
+          a.outcome === 'multiple' && a.count === 2 && a.count !== 1, `实测 ${a.outcome}/${a.count}`);
+        ck(`${tag} reject 里写着「outcome=multiple count=2」`,
+          why.indexOf('outcome=multiple count=2') >= 0, why.slice(0, 200));
+        // 诚实口径：这一张的铅笔那一支**也**是红的（删掉那条线索之后 BASIC 也推不完），
+        // 所以这里断的是"count!==1 这一支确实被走到并写进了 reason 串"，不断"只有它红"。
+        // "只有某一支红"的形状由 endpoints 那一张（其余四条全绿）与 pencil 那一张负责。
+        ck(`${tag} 诚实口径：这一张不是"只红一条"（pencilSolved=${a.pencilSolved}），断言只钉 count!==1 与 reason 串`,
+          a.count !== 1 && exp1.conflict === null && a.stopped === false, `count=${a.count} stopped=${a.stopped}`);
+        attribution[smp.name] = `count=${a.count}!==1（outcome=multiple）`;
+      }
+      if (smp.name === 'adjacency') {
+        eq(`${tag} reason 逐字 = given-adjacency（rules.givenConflict 的原样串）`, a.conflict, 'given-adjacency');
+        ck(`${tag} 题面不成立就不该进搜索：count=0 且 nodes=0`, a.count === 0 && a.nodes === 0,
+          `count=${a.count} nodes=${a.nodes}`);
+        ck(`${tag} reject 里写着「题面冲突=given-adjacency」`, why.indexOf('题面冲突=given-adjacency') >= 0, why.slice(0, 200));
+        // 独立见证 B 的那一条分支：本仓**从来没有在浏览器里证明过它可达**（counter.js 走的是
+        // rules.givenConflict，witness.js 是自己另写的一份判据）。这里当场 import 同一批 js/ 模块跑它。
+        const gen = await mod('./js/engine/generate.js');
+        const rules = await mod('./js/engine/rules.js');
+        const wit = await mod('./js/engine/witness.js');
+        const Gg = gen.gridFor(gen.tierOf(smp.tier));
+        const wb = wit.countWitnessB(Gg, rules.toGivenCell(Gg, smp.clues));
+        const want = smp.witnessB;
+        eq(`${tag} witness.js 的 countWitnessB 在浏览器里也走到 given-adjacency 这一支（reason 逐字）`, wb.reason, want.reason);
+        eq(`${tag} countWitnessB 的 outcome = node 侧`, wb.outcome, want.outcome);
+        eq(`${tag} countWitnessB 交回 count=0（不进搜索）`, wb.count, want.count);
+        eq(`${tag} countWitnessB 交回 nodes=0（不进搜索）`, wb.nodes, want.nodes);
+        ck(`${tag} 两条通道（裁判 + 见证 B）对同一张非法题面同读数、且都没进搜索`,
+          wb.reason === a.conflict && wb.count === a.count && wb.nodes === a.nodes,
+          `witnessB ${wb.reason}/${wb.count}/${wb.nodes} vs referee ${a.conflict}/${a.count}/${a.nodes}`);
+        attribution[smp.name] = 'given-adjacency（count=0/nodes=0，两条通道同读数）';
+      }
+      if (smp.name === 'endpoints') {
+        ck(`${tag} 其余四条在这一张上**全是绿的**（归因干净：红的只有端点这一条）`,
+          a.stopped === false && a.outcome === 'unique' && a.count === 1 && a.pencilSolved === true && a.conflict === null,
+          `stopped=${a.stopped} outcome=${a.outcome} count=${a.count} pencilSolved=${a.pencilSolved} conflict=${a.conflict}`);
+        eq(`${tag} 唯一红的那条：missingEndpoints = node 侧的那一个`, a.endpoints, exp1.endpoints);
+        ck(`${tag} reject 里写着「端点：missingEndpoints=${exp1.endpoints}」`,
+          why.indexOf(`端点：missingEndpoints=${exp1.endpoints}`) >= 0, why.slice(0, 200));
+        ck(`${tag} boardIsProven 的 endpoints 分支在浏览器里被走过（proven=false 且 #reject 展开）`,
+          out.proven === false && shown('#reject'), `proven=${out.proven}`);
+        attribution[smp.name] = `endpoints=${a.endpoints}（其余四条绿）`;
+      }
+    }
+
+    // 可达性总账：清单要几张、就收到几张"分支被走到过"的证人。
+    for (const smp of E.samples) {
+      ck(`负样本 ${smp.name} 的拒绝分支在本页被走到过（reached 证人记了一笔）`,
+        reached[smp.name] === true, `canaryDrop=${E.canaryDrop || 'none'}：这一张没进注入序列 ⇒ 分支可达性没有证据`);
+    }
+    ck(`五张负样本全部注入过并拒了（reached 5/5 · #reject 展开 ${(E.samples.length - (E.canaryDrop ? 1 : 0))} 次）`,
+      Object.keys(reached).length === E.samples.length - (E.canaryDrop ? 1 : 0) && rejectedOpen === Object.keys(reached).length,
+      `reached ${JSON.stringify(Object.keys(reached))} · reject ${rejectedOpen}`);
+    ck(`每一次拒收都把 #board-wrap 收成**真**隐藏（hiddenTight 计数与注入数相同）`,
+      boardHiddenTight === Object.keys(reached).length, `${boardHiddenTight} vs ${Object.keys(reached).length}`);
+    ck('node 侧谓词与页面 boardIsProven 逐张对账（两份拼写一张不落）',
+      provenMatch === Object.keys(reached).length, `${provenMatch} vs ${Object.keys(reached).length}`);
+
+    // 恢复：注入盘不许留在页面上，也不许留在档里。
+    const back = H().open(E.tier, E.seed, false);
+    await wait(0);
+    const st = S();
+    ck('收尾把证人那张正常盘开回来（open 交回 summary 且 state() 有读数）',
+      !!back && !!st && back.tier === E.tier, JSON.stringify(back).slice(0, 140));
+    eq('恢复后的出货盘指纹 = node 侧 witness（页面上不再挂着注入盘）', st.fingerprint, E.fingerprint);
+    ck('恢复后的盘通过页面自己的验收（proven=true）且 #reject 收起、#board-wrap 展开',
+      st.proven === true && hiddenTight('#reject') && shown('#board-wrap'), whyNotTight('#reject'));
+    const wiped1 = H().gate.wipeSave();
+    const lsKeys = Object.keys(localStorage);
+    ck('收尾再 wipe 一次：canary 不污染存档（wipeSave 读回 null 且 localStorage 一个键都不剩）',
+      wiped1 === null && lsKeys.length === 0, `wipeSave=${wiped1} keys=${JSON.stringify(lsKeys)}`);
+
+    return report({
+      samples: E.samples.length, reachedNames: Object.keys(reached),
+      reasons: Object.keys(reasons).map((k) => `${k}→${(reasons[k].split('\n')[0] || '').slice(0, 58)}`),
+      attribution, stopNodeCap: E.stopNodeCap, msCapNeverUsed: true,
+      rejectRows: rejectedOpen, boardHiddenRows: boardHiddenTight, provenMatches: provenMatch,
+      baseTier: E.tier, baseSeed: E.seed, restoredFingerprint: st ? st.fingerprint : null,
+      sabotageDrop: E.canaryDrop || null, href: location.href,
+      _assessMsBySample: msSeen, _baseAssessMs: Number((E.baseAssess && E.baseAssess.ms || 0).toFixed(3)),
+    });
+  };
+
+  w.__scn = { boot, crossengine, pointer, keyboard, resume, narrow, canary };
 })(window);

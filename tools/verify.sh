@@ -18,6 +18,12 @@
 #                                              # 键盘腿的阴性自证：期望轨迹被故意打断一格 ⇒ 那一键必红
 #   SABOTAGE=1 LEGS="resume" SHAPES=root bash tools/verify.sh
 #                                              # 续局腿的阴性自证：把"新文档"证人假装成**同文档片段跳转**
+#   SABOTAGE=1 LEGS="narrow" SHAPES=root bash tools/verify.sh
+#                                              # 窄屏腿的阴性自证：把期望的 dpr 换成 1（覆写实际给的是 2）
+#                                              # ⇒ 覆写证人那条红：读数与请求的尺寸不符就是"没被覆写"
+#   SABOTAGE=1 LEGS="canary" SHAPES=root bash tools/verify.sh
+#                                              # canary 腿的阴性自证：拿掉 given-adjacency 那一张负样本
+#                                              # ⇒ 那条"拒绝分支在浏览器里可达"必须红
 #   PLANT_TRUTH=1 LEGS="resume" SHAPES=root bash tools/verify.sh
 #                                              # 续局腿的阴性自证第二把：真值当场写进 localStorage ⇒ 落盘扫描必抓
 #
@@ -57,8 +63,18 @@ PLAY_TIER=5x5; PLAY_SEED=h0                 # 场景 B 那张走完的 5×5（15
 RESUME_TIER=6x6; RESUME_SEED=m1             # 续局腿刻意换一档：它**不等于**默认档（js/main.js 的
 #   DEFAULT_TIER=TIERS[0]=5x5 / DEFAULT_SEED=h0），而续局腿的导航 URL 不带查询串 ⇒
 #   刷新后 boot.requested 落在 6x6/m1 上就只可能是**从存档读来的**，不可能是"默认值恰好撞上了"。
-# 每条形态的腿清单（本回合 6 条；canary/移动端腿归 2e）。少交一回结果就是悄悄少跑。
-LEGS_DONE=${LEGS:-"boot-default boot-url crossengine pointer keyboard resume"}
+# 窄屏腿的视口与盘：390×844 + dpr 2 是"必须重排"的尺寸（CSS 那条 @media (max-width:520px) 命中、
+#   board-wrap 从并排换成换行），盘故意挑**最宽的一档** 7x7（横向溢出风险最大）。
+#   这两个数同时是断言的输入：verify.sh 把它们写进 expect 的 vwWant/vhWant/dprWant/mobileWant，
+#   腿内读回 innerWidth/devicePixelRatio/clientWidth/innerHeight 逐条对账 ⇒ 覆写没生效就当场红。
+NARROW_VIEWPORT=${NARROW_VIEWPORT:-390x844x2}
+NARROW_TIER=7x7; NARROW_SEED=m0
+# canary 腿的底座盘：node 侧从这张**出货盘**出发造负样本（掐停那一张用的就是它的题面 + 小 nodeCap）。
+# 7x7 的出货盘裁判要 141+ 节点，nodeCap 掐到 40 必然停在 41 节点（<256 ⇒ ms 闸结构上到不了）。
+# 不用 5x5/m0：那是 SABOTAGE_SEED 默认那一档（指纹会被故意改错），撞上来就让归因分不清了。
+CANARY_TIER=7x7; CANARY_SEED=m0
+# 每条形态的腿清单（本回合 8 条：2e 把 canary 与窄屏两条腿交齐了）。少交一回结果就是悄悄少跑。
+LEGS_DONE=${LEGS:-"boot-default boot-url crossengine pointer keyboard resume narrow canary"}
 if [ -z "$CHROME" ]; then
   for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
            "/Applications/Chromium.app/Contents/MacOS/Chromium" \
@@ -209,7 +225,7 @@ stop_chrome() {
 # run_leg <shape> <leg> —— 腿名到"场景 / mode / 导航 URL / node 期望"的那张表在这里，只有一处。
 run_leg() {
   local shape=$1 leg=$2 base=$3 s expect='' nav='' mode=scenario
-  local vp=$VIEWPORT                      # 默认走这一形态的视口；个别腿自己换（见 keyboard）
+  local vp=$VIEWPORT mob=0             # 默认走这一形态的视口；个别腿自己换（见 keyboard / narrow）
   s=$leg                       # 报告用的腿名；场景名在下面这张表里
   case "$leg" in
     boot-default)
@@ -257,13 +273,50 @@ run_leg() {
       # 阴性自证第二把：把 node 侧真值当场写进 localStorage，刷新后那两条落盘卫生扫描必须抓到
       [ "$PLANT_TRUTH" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["plant"]=1;print(json.dumps(d))')
       ;;
+    narrow)
+      # 窄屏/移动端腿：视口与 dpr 的覆写发生在**这条腿自己那一次 playtest 调用**里（attach 之后、
+      # 首次导航之前、同一个 CDP session）。绝不另起一个进程设覆写就退出 —— 兄弟仓那版"移动腿"就是这么
+      # 写的，于是跑断言的那个进程从没被覆写，在 vw 1280 / dpr 1 下把桌面那套断言又跑一遍，
+      # 报出与桌面腿**相同的条数**（这一族最贵的假绿）。判据：读回的 vw/dpr 必须与请求的对上，
+      # 且这一腿的断言是窄屏形状（横向溢出 / 逐格命中盒 / 重排证人 / 44px 指尖目标），条数不可能与桌面腿相同。
+      s=narrow
+      vp=$NARROW_VIEWPORT
+      mob=1
+      nav="${base}?tier=${NARROW_TIER}&seed=${NARROW_SEED}"
+      expect=$(node tools/playtest.cjs witness "$NARROW_TIER" "$NARROW_SEED") || { echo "  node 证人起不来（$NARROW_TIER/$NARROW_SEED）" >&2; RUNBAD=1; return; }
+      # 把"请求了什么视口"写进期望值：页内读回的 innerWidth / devicePixelRatio / clientWidth /
+      # innerHeight 逐条与它对账 ⇒ 覆写没生效（读数 = Chrome 窗口那一对）当场红。
+      expect=$(printf '%s' "$expect" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+p = sys.argv[1].split("x")
+d["vwWant"] = int(p[0]); d["vhWant"] = int(p[1])
+d["dprWant"] = int(p[2]) if len(p) > 2 else 1
+d["mobileWant"] = True
+print(json.dumps(d))' "$vp") || { echo "  窄屏腿的视口三元组拼不进 expect（$vp）" >&2; RUNBAD=1; return; }
+      # 阴性自证：把**期望的 dpr** 换成 1（覆写实际给的是 2）⇒ 覆写证人红 + 那条"请求的不是桌面那一队"红。
+      [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["dprWant"]=1;print(json.dumps(d))')
+      ;;
+    canary)
+      # 拒盘 canary：这一腿不验"页面能出货"，验的是**拒绝分支在浏览器里到得了**
+      # （铅笔推不完 / nodeCap 掐停 / count!==1 / given-adjacency / 端点没印全）。
+      # 题面与期望读数由 node 侧证人（playtest.cjs canary）算，页内不现生成；
+      # 掐停只许 nodeCap（<256 ⇒ counter.js 每 256 个节点才查一次的 ms 闸结构上到不了）——
+      # 用 msCap 造负样本会让盘形跟着机器速度变，那是本组织的红线，一条都不许碰。
+      s=canary
+      nav="$base"
+      expect=$(node tools/playtest.cjs canary "$CANARY_TIER" "$CANARY_SEED") || { echo "  canary 的 node 证人交不出五张负样本（$CANARY_TIER/$CANARY_SEED）" >&2; RUNBAD=1; return; }
+      # 阴性自证：拿掉 given-adjacency 那一张负样本 ⇒ 那条"分支可达"必须红（这一腿最值钱的就是让人
+      # 看见拒绝分支没被走到，所以它必须能红）。
+      [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["canaryDrop"]="adjacency";print(json.dumps(d))')
+      ;;
     *) echo "  不认识这条腿：$leg" >&2; RUNBAD=1; return ;;
   esac
   local tally extra clog n m
   tally="$LOGDIR/$shape-$s.tally"; extra="$LOGDIR/$shape-$s.extra.json"; clog="$LOGDIR/$shape-$s.console.log"
   rm -f "$tally" "$extra"
-  echo "=== [$shape] $s (mode ${mode:-scenario}, viewport $vp, nav $nav) ==="
-  VIEWPORT=$vp NAV_URL=$nav node tools/playtest.cjs "$mode" "$s" "$expect" 2>"$clog" | tail -1 \
+  echo "=== [$shape] $s (mode ${mode:-scenario}, viewport $vp, mobile $mob, nav $nav) ==="
+  VIEWPORT=$vp EMULATE_MOBILE=$mob NAV_URL=$nav node tools/playtest.cjs "$mode" "$s" "$expect" 2>"$clog" | tail -1 \
     | python3 -c "$PARSE" "$shape" "$s" "$tally" "$extra" || RUNBAD=1
   if [ -s "$tally" ]; then
     read -r n m < "$tally"

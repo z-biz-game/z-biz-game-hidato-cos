@@ -4,8 +4,20 @@
 //      BASE_URL  页面 origin，默认 http://127.0.0.1:5401/
 //      NAV_URL   scenario/interact 的**导航 URL**（同源，可带查询串）；缺省 = BASE_URL
 //                verify.sh 用它跑 ?tier=&seed= 那一形态
-//      VIEWPORT  可选 "WxH"；设了就在**首次导航之前**覆盖 device metrics，一个页面一个 profile
-//                既能按 1280×1024 量也能按 390×844 量，不需要窗口管理器
+//      VIEWPORT  可选 "WxH" 或 "WxHxD"（D=deviceScaleFactor，缺省 1）；设了就在**首次导航之前**
+//                覆盖 device metrics，一个页面一个 profile 既能按 1280×1024 量也能按 390×844×2 量，
+//                不需要窗口管理器。**覆写挂在 attach 出来的那个 session 上**：进程退出 = 会话关闭 =
+//                覆写消失，所以窄屏腿必须在自己那次调用里带 VIEWPORT，绝不许"先起一个进程设覆写就退出"
+//                （那样跑断言的进程从没被覆写，只是把桌面断言在 vw 1280 上又跑一遍）。
+//      EMULATE_MOBILE  '1' 时 Emulation.setDeviceMetricsOverride 带 mobile:true（真移动端形状：
+//                页内 <meta name="viewport"> 被当移动视口处理、滚动条是 overlay 的 ⇒ clientWidth
+//                不被经典滚动条啃掉）。只在 VIEWPORT 也设了的时候有意义。
+//                **本仓实测**：这一位取 1 与取 0 的读回值完全相同（innerWidth/innerHeight/
+//                devicePixelRatio/clientWidth 四对全等），因为 hidato 只靠 width=device-width 那条
+//                meta + 一条 @media (max-width:520px) 就重排到位，没有可被啃掉的经典滚动条。
+//                所以窄屏腿**没有任何一条断言挂在这个标志上**（挂上去就是一条永远同意的白断言）：
+//                覆写的证人只有 vw/vh/dpr/clientWidth 那四对读数与两条互为反证的 matchMedia。
+//                它只是让请求的形状更贴近真机，不构成证据。
 //      MAX_ROUNDS interact 的回合上限（默认 12）
 //      SABOTAGE  闸的**阴性自证**开关（只对 witness / crossengine 的 node 侧期望生效）：
 //                把期望指纹改错一位。绿不了的闸不是闸，这一条是验收第 4 项要求的自测旋钮，
@@ -25,6 +37,12 @@
 //                                                   再回来跑下一回合
 //   node tools/playtest.cjs witness <tier> <seed>   **node 侧证人**（不起 Chrome）：用浏览器加载的
 //                                                   同一批 js/ 模块现算那张盘的出货指纹 / 真解 / 裁判读数
+//   node tools/playtest.cjs canary <tier> <seed>    **拒盘 canary 的 node 侧证人**（不起 Chrome）：
+//                                                   五张负样本（铅笔推不完 / nodeCap 掐停 / 多解 /
+//                                                   given-adjacency / 端点没印全）的**题面与期望读数**
+//                                                   全在这里算，页内只比对。掐停只许用 nodeCap
+//                                                   （<256 ⇒ counter.js 里每 256 个节点才查一次的 ms 闸
+//                                                   结构上到不了），绝不许用 msCap 造负样本。
 //   node tools/playtest.cjs shot <file.png>
 //   node tools/playtest.cjs logs
 //
@@ -44,7 +62,6 @@ const { pathToFileURL } = require('url');
 const PORT = Number(process.env.CDP_PORT || 9401);
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:5401/';
 const ORIGIN = new URL(BASE).origin;
-const VIEWPORT = /^(\d+)x(\d+)$/.exec(process.env.VIEWPORT || '');
 const SABOTAGE = process.env.SABOTAGE === '1';
 // 阴性自证只改**一张盘**的期望：这样"红"落在具体那一档那一个 seed 上，而不是整批一起红 ——
 // 整批红分不清是比对逻辑坏了还是期望没接上。
@@ -53,6 +70,21 @@ const cmd = process.argv[2];
 const arg = process.argv[3];
 const rest = process.argv[4];
 const isOurs = (u) => typeof u === 'string' && u.startsWith(ORIGIN);
+
+/**
+ * VIEWPORT → { width, height, dpr, mobile }；不接受的形状一律当"没设"（桌面腿走 Chrome 窗口尺寸）。
+ * dpr 越界直接抛：静默按 1 跑就是"窄屏腿在桌面上重跑"那颗假绿的起手式。
+ */
+function parseViewport(s) {
+  const str = String(s || '');
+  if (!str) return null;
+  const m = /^(\d+)x(\d+)(?:x(\d+))?$/.exec(str);
+  if (!m) throw new Error(`VIEWPORT 形状不认识（要 WxH 或 WxHxD）：${str}`);
+  const dpr = m[3] === undefined ? 1 : Number(m[3]);
+  if (!(dpr >= 1 && dpr <= 8)) throw new Error(`deviceScaleFactor 不在 1..8 里：${dpr}`);
+  return { width: Number(m[1]), height: Number(m[2]), dpr, mobile: process.env.EMULATE_MOBILE === '1' };
+}
+const VIEWPORT = parseViewport(process.env.VIEWPORT);
 
 const logs = [];
 
@@ -114,6 +146,132 @@ async function nodeBoard(tierKey, seed) {
     budgetMs: tier.budgetMs,
     nodeCap: tier.nodeCap,
     ...watch,
+  };
+}
+
+/**
+ * canary 腿的 node 侧证人：**五张负样本的题面与期望读数全在这里算出来**，页内只比对。
+ * 页内不现生成盘子，否则"注入的到底是什么盘"没人知道（而且 Math.random 进场景就是确定性红线）。
+ * 候选盘的搜索顺序是固定的 (tier, seed) 表 + 固定的删线索下标序 ⇒ 纯函数，同输入同输出。
+ */
+async function canaryWit(baseTierKey, baseSeed) {
+  const rel = (...p) => pathToFileURL(path.join(__dirname, '..', ...p)).href;
+  const gen = await import(rel('js', 'engine', 'generate.js'));
+  const rules = await import(rel('js', 'engine', 'rules.js'));
+  const { countSolutions } = await import(rel('js', 'engine', 'counter.js'));
+  const { pencilSolve, BASIC_RULES } = await import(rel('js', 'engine', 'pencil.js'));
+  const { countWitnessB } = await import(rel('js', 'engine', 'witness.js'));
+
+  /** 与 js/ui/game.js 的 boardIsProven 同语义、**另一份拼写**：注入盘没有梯层，那一支不参与。 */
+  const provenOf = (r) => !r.stopped && r.outcome === 'unique' && r.count === 1 &&
+    r.pencilSolved === true && r.endpoints === null && r.conflict === null;
+
+  /** 与 js/ui/game.js 的 assessBoard 同一条读数（同样只取标量，solutions 数组一个字节都不带走）。 */
+  const nodeAssess = (tierKey, clues, budget) => {
+    const tier = gen.tierOf(tierKey);
+    const G = gen.gridFor(tier);
+    const given = rules.toGivenCell(G, clues);
+    const opts = { nodeCap: budget?.nodeCap ?? tier.nodeCap, msCap: budget?.msCap ?? tier.budgetMs };
+    const ref = countSolutions(G, given, opts);
+    const pen = pencilSolve(G, given, BASIC_RULES);
+    const r = {
+      outcome: ref.outcome, count: ref.count, stopped: ref.stopped, stoppedBy: ref.stoppedBy,
+      nodes: ref.nodes, ms: ref.ms, multiWay: ref.multiWay, deadEnds: ref.deadEnds, maxGap: ref.maxGap,
+      givens: rules.fromGivenCell(given).length,
+      pencilSolved: pen.solved, pencilUndecided: pen.undecided, pencilContradiction: pen.contradiction,
+      endpoints: rules.missingEndpoints(G, given), conflict: rules.givenConflict(G, given),
+      budgetMs: opts.msCap, nodeCap: opts.nodeCap,
+    };
+    r.proven = provenOf(r);
+    return r;
+  };
+
+  const base = await nodeBoard(baseTierKey, baseSeed);
+  if (!base.ok) return { ok: false, why: '底座盘不出货', base, missing: ['*'] };
+  const G = gen.gridFor(gen.tierOf(baseTierKey));
+
+  // ── 负样本 2：同一张**出货盘**的题面，只把节点预算掐到 40（< 256 ⇒ counter.js 每 256 个节点
+  //    才查一次的 ms 闸结构上到不了，归因只会是 nodes）。生产预算下这张盘是绿的，所以红的只有 stopped 一条。
+  const STOP_NODE_CAP = 40;
+  const stoppedFull = nodeAssess(base.tier, base.clues);
+  const stoppedCut = nodeAssess(base.tier, base.clues, { nodeCap: STOP_NODE_CAP });
+
+  // ── 负样本 1/3/5：固定顺序扫候选出货盘，逐条删线索，取**第一个**满足"只有这一条红"的形状。
+  const CAND_SEEDS = ['m0', 'm1', 'm2', 'm3', 'm4', 'm5', 'h0', 'h1'];
+  const CAND_TIERS = ['5x5', '6x6', '7x7'];
+  let pencil = null, multiple = null, endpoints = null;
+  const scanned = [];
+  outer: for (const tk of CAND_TIERS) {
+    for (const sd of CAND_SEEDS) {
+      const b = await nodeBoard(tk, sd);
+      if (!b.ok) { scanned.push(`${tk}/${sd} 不出货`); continue; }
+      scanned.push(`${tk}/${sd}`);
+      for (let i = 0; i < b.clues.length; i++) {
+        const clues = b.clues.filter((_, k) => k !== i);
+        const r = nodeAssess(b.tier, clues);
+        if (!pencil && r.outcome === 'unique' && r.count === 1 && !r.stopped && !r.pencilSolved &&
+            r.endpoints === null && r.conflict === null) {
+          pencil = { from: `${b.tier}/${b.seed} 删掉 v=${b.clues[i].v} 这一条题面`, tier: b.tier, clues, budget: null, expect: r };
+        }
+        if (!multiple && r.outcome === 'multiple' && r.count === 2 && !r.stopped &&
+            r.endpoints === null && r.conflict === null) {
+          multiple = { from: `${b.tier}/${b.seed} 删掉 v=${b.clues[i].v} 这一条题面`, tier: b.tier, clues, budget: null, expect: r };
+        }
+        if (pencil && multiple) break;
+      }
+      if (!endpoints) {
+        for (const v of [b.n, 1]) {
+          const clues = b.clues.filter((c) => c.v !== v);
+          if (clues.length === b.clues.length) continue;         // 这一档这张盘没印那个端点（不该发生）
+          const r = nodeAssess(b.tier, clues);
+          if (r.outcome === 'unique' && r.count === 1 && !r.stopped && r.pencilSolved &&
+              r.conflict === null && r.endpoints !== null) {
+            endpoints = { from: `${b.tier}/${b.seed} 删掉端点 v=${v} 那一条题面`, tier: b.tier, clues, budget: null, expect: r };
+            break;
+          }
+        }
+      }
+      if (pencil && multiple && endpoints) break outer;
+    }
+  }
+
+  // ── 负样本 4：相邻两印（1 与 2）不王步相邻的非法题面。构造是纯算术，不碰随机。
+  const mid = Math.floor(G.R / 2) * G.C + Math.floor(G.C / 2);
+  const adjacencyClues = [{ v: 1, cell: 0 }, { v: 2, cell: G.n - 1 }, { v: G.n, cell: mid }];
+  const adjacencyExpect = nodeAssess(base.tier, adjacencyClues);
+  const adjacencyWitnessB = (() => {
+    const given = rules.toGivenCell(G, adjacencyClues);
+    const r = countWitnessB(G, given);
+    return { outcome: r.outcome, reason: r.reason, count: r.count, nodes: r.nodes, stopped: r.stopped };
+  })();
+  const adjacency = {
+    from: `题面 {1→格 0, 2→格 ${G.n - 1}, ${G.n}→格 ${mid}}：1 与 2 印在棋盘两端，不王步相邻`,
+    tier: base.tier, clues: adjacencyClues, budget: null, expect: adjacencyExpect,
+    witnessB: adjacencyWitnessB,
+  };
+
+  const samples = [
+    pencil && { name: 'pencil', ...pencil, branch: 'pencilSolved' },
+    stoppedCut.stopped && stoppedCut.stoppedBy === 'nodes'
+      ? { name: 'stopped', from: `底座 ${base.tier}/${base.seed} 的**同一张出货盘**，只把 nodeCap 掐到 ${STOP_NODE_CAP}（msCap 用生产档位值，绝不改）`,
+          tier: base.tier, clues: base.clues, budget: { nodeCap: STOP_NODE_CAP }, expect: stoppedCut,
+          branch: 'stopped', fullBudgetControl: stoppedFull }
+      : null,
+    multiple && { name: 'multiple', ...multiple, branch: 'count!==1' },
+    adjacencyExpect.conflict === 'given-adjacency' && adjacencyExpect.count === 0 && adjacencyExpect.nodes === 0
+      ? adjacency && { name: 'adjacency', ...adjacency, branch: 'given-adjacency' } : null,
+    endpoints && { name: 'endpoints', ...endpoints, branch: 'endpoints' },
+  ];
+  const named = samples.filter(Boolean);
+  const wantNames = ['pencil', 'stopped', 'multiple', 'adjacency', 'endpoints'];
+  const gotNames = named.map((s) => s.name);
+  const notFound = wantNames.filter((k) => gotNames.indexOf(k) < 0);
+  if (notFound.length) return { ok: false, why: 'node 侧找不到这一张负样本', missing: notFound, scanned, base };
+  return {
+    ok: true,
+    tier: base.tier, seed: base.seed, fingerprint: base.fingerprint, fingerprintNode: base.fingerprintNode,
+    n: base.n, R: base.R, C: base.C, clueCount: base.clueCount, budgetMs: base.budgetMs, nodeCap: base.nodeCap,
+    baseAssess: stoppedFull, stopNodeCap: STOP_NODE_CAP, samples: named, scanned,
   };
 }
 
@@ -232,6 +390,15 @@ async function main() {
     console.log(JSON.stringify(b));
     process.exit(0);
   }
+  if (cmd === 'canary') {
+    // 找不到任何一张符合形状的负样本 ⇒ **非 0 退出**：verify.sh 那张表会把这一腿记成 RUNBAD，
+    // 而不是"少了几条断言但仍然绿"。宁可这条腿不交，也不交一张假装跑过的。
+    const j = await canaryWit(arg, rest);
+    console.log(JSON.stringify(j));
+    if (!j.ok) console.error('canary 证人失败：' + j.why + ' 缺 ' + JSON.stringify(j.missing));
+    process.exitCode = j.ok ? 0 : 1;
+    return;
+  }
 
   const info = await waitForDevTools();
   const ws = new WebSocket(info.webSocketDebuggerUrl);
@@ -267,10 +434,10 @@ async function main() {
   await cdp.send('Page.enable', {}, sessionId);
   if (VIEWPORT) {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: Number(VIEWPORT[1]),
-      height: Number(VIEWPORT[2]),
-      deviceScaleFactor: 1,
-      mobile: false,
+      width: VIEWPORT.width,
+      height: VIEWPORT.height,
+      deviceScaleFactor: VIEWPORT.dpr,
+      mobile: VIEWPORT.mobile,
     }, sessionId);
   }
 
@@ -402,8 +569,8 @@ async function main() {
       const all = (parsed.rows || []).concat(rows);
       parsed.rows = all;
       parsed.fail = all.filter((r) => !r.pass).length;
-      parsed.chromeMaxMs = Number((samples.length ? Math.max(...samples.map((s) => Number(s.refereeMaxMs) || 0)) : 0).toFixed(3));
-      parsed.nodeMaxMs = Number(extra.nodeMaxMs.toFixed(3));
+      parsed._chromeMaxMs = Number((samples.length ? Math.max(...samples.map((s) => Number(s.refereeMaxMs) || 0)) : 0).toFixed(3));
+      parsed._nodeMaxMs = Number(extra.nodeMaxMs.toFixed(3));
       parsed.budgetMs = samples.length ? (await nodeBoard(samples[0].tier, samples[0].seed)).budgetMs : null;
       parsed.msCapChrome = samples.reduce((a, s) => a + (s.stoppedByMs || 0), 0);
       parsed.msCapNode = extra.nodeMsCap;
