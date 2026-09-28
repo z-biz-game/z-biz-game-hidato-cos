@@ -1,10 +1,12 @@
 // 浏览器闸跑在页面里的场景：注入后由 tools/playtest.cjs 的 `scenario|interact <名>` 调 window.__scn.<名>()。
 //
-// 本回合三条腿（简报的验收合同）：
+// 本回合五条腿（简报的验收合同）：
 //   · boot        场景 A · 启动与"页面里没有答案"（含 URL 定盘、msCap=0 证人、真值扫描）
 //   · crossengine 场景 C · 18 张出货盘的**跨引擎指纹对账**（页侧收集，node 侧逐条比）
 //   · pointer     场景 B · CDP 真指针把一张 5×5 走完（多回合：页面交坐标，node 去点）
-// 键盘腿 / 续局腿 / canary 腿 / 移动端腿归下一条回合（2d），这里**没有半成品**。
+//   · keyboard    场景 D · **真键盘通道**（CDP Input.dispatchKeyEvent；页面一个 hidato.press() 都不调）
+//   · resume      场景 E · 跨**真刷新**续玩（Page.reload；刷新前证人由 node 取走再送回来）
+// canary 腿 / 移动端腿归下一条回合（2e），这里**没有半成品**。
 //
 // 规矩与兄弟仓同名同姓，内容是本仓自己的：
 //   * 一条断言只写一次 `ck(名, 条件, 细节)`，机器可读的 `RESULT <json>` 由 playtest.cjs 打在 stdout
@@ -51,6 +53,12 @@
     return out;
   };
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  /**
+   * 把已经攒下的断言**交回 node 保管**并清空。续局腿非用不可：Page.reload 之后这是一个新文档，
+   * 模块级 `rows` 数组跟着旧文档一起没了 —— 不交回来的话刷新前那两回合的断言就凭空蒸发，
+   * tally 里只剩刷新后的读数，那条腿就变成"只验了后半截"。
+   */
+  const drain = () => { const o = { rows: rows.slice(), fail: rows.filter((r) => !r.pass).length }; rows.length = 0; return o; };
   const $ = (sel) => document.querySelector(sel);
   const H = () => w.hidato;
   const D = () => w.hidato.dom;
@@ -544,5 +552,518 @@
     return out;
   };
 
-  w.__scn = { boot, crossengine, pointer };
+  // ==================================================== 键盘通道的公共件（场景 D 与 E 共用）
+  /**
+   * 键 → 方向位移。与 js/main.js 的 onKey 同一套键名，但**期望值由这个模型算**，
+   * 不是"跟页面上一次读数对表"：每键一个精确期望，才抓得住"同一条 keydown 绑了两处 ⇒ 一次走两格"。
+   * 这个 oracle 是 js/ui/game.js 的 move()/nudge()/setEmpty() 公式的第二份拼写（闸侧独立实现）：
+   * 它抓的是**接线**（双绑 / 焦点守卫 / preventDefault / 存档），抓不了**语义变更**——
+   * 语义变更由 tools/rule-test.mjs 那条腿负责，别把这条腿当成语义闸。
+   */
+  const KEY_DRIFT = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] };
+
+  /**
+   * 纯模型：从 startSel 起把 keys 挨个走一遍，交回**每键的期望**（选中格 / 选中格显示值 / 手数）。
+   * 题面（given 格与 given 数）来自 node 证人的 E.clues；**E.solution 一个字节都不读**。
+   * @param breakAt 阴性自证：把这一格的期望**多走一步**（真键盘不会走两步 ⇒ 该键必红）。
+   */
+  const kbOracle = (E, startSel, keys, breakAt) => {
+    const R = E.R, C = E.C, n = E.n;
+    const givenCell = new Set(E.clues.map((c) => c.cell));
+    const givenVal = new Set(E.clues.map((c) => c.v));
+    const val = new Array(n).fill(0);
+    for (const cl of E.clues) val[cl.cell] = cl.v;         // 给定格在 cellVal 里预填（js/ui/game.js 的口径）
+    let sel = startSel, steps = 0, stalled = 0;
+    const per = [];
+    keys.forEach((key, i) => {
+      const mult = (i === breakAt && KEY_DRIFT[key]) ? 2 : 1;
+      const d = KEY_DRIFT[key];
+      if (d) {
+        const before = sel;
+        let r = Math.floor(sel / C) + d[0] * mult;
+        let c = (sel % C) + d[1] * mult;
+        r = Math.max(0, Math.min(R - 1, r));               // 永不出盘：钳在盘内，不环绕
+        c = Math.max(0, Math.min(C - 1, c));
+        sel = r * C + c;
+        if (sel === before) stalled++;                     // 触边次数（模型侧证人：这条序列确实压到了边界）
+      } else if (key === '=' || key === '+' || key === '-' || key === '_') {
+        const delta = (key === '=' || key === '+') ? 1 : -1;
+        const mult2 = (i === breakAt) ? 2 : 1;             // 阴性自证也允许打在写键上
+        if (!givenCell.has(sel)) {
+          const cur = val[sel];
+          const from = cur || (delta > 0 ? 0 : 2);         // 空格按 + 从 1 起、按 - 从 1 起（js/ui/game.js）
+          let v = from + delta * mult2;
+          if (v >= 1 && v <= n) {
+            while (v >= 1 && v <= n && givenVal.has(v)) v += delta;   // 印着的数不在玩家可写范围里
+            if (v >= 1 && v <= n && v !== cur) {
+              for (let k = 0; k < n; k++) if (val[k] === v) val[k] = 0;  // 同一个值永远只占一格
+              val[sel] = v; steps++;
+            }
+          }
+        }
+      } else if (key === 'Backspace' || key === 'Delete') {
+        if (!givenCell.has(sel) && val[sel]) { val[sel] = 0; steps++; }
+      }
+      per.push({ key, sel, val: String(val[sel]), steps });
+    });
+    return { per, stalled, end: sel };
+  };
+
+  /** 从 from 单调走到 to（先修行后修列，越界不存在 ⇒ 终点就是 to）。 */
+  const homeKeys = (from, to, C) => {
+    const out = [];
+    const dr = Math.floor(to / C) - Math.floor(from / C);
+    const dc = (to % C) - (from % C);
+    for (let i = 0; i < Math.abs(dr); i++) out.push(dr > 0 ? 'ArrowDown' : 'ArrowUp');
+    for (let i = 0; i < Math.abs(dc); i++) out.push(dc > 0 ? 'ArrowRight' : 'ArrowLeft');
+    return out;
+  };
+
+  /**
+   * 页内键盘**证人**：window 上的第二个 keydown 监听器，注册时机在 js/main.js 之后
+   * ⇒ 同一次派发里它跑在 onKey 之后，读到的是"页面处理完之后的状态"。
+   * 它不 preventDefault、不调任何 hidato.* 动词，只抄一份读数；
+   * `dp`（defaultPrevented）是**这条派发被处理过**的直接证据，`tgt` 是**派发跟着焦点**的直接证据。
+   */
+  const KLOG = [];
+  const installKeyRecorder = () => {
+    if (w.__kbRecorder) return;
+    w.__kbRecorder = true;
+    w.addEventListener('keydown', (ev) => {
+      const g = H().game;
+      if (!g) return;
+      const t = ev.target;
+      const el = document.querySelector(`#board [data-cell="${g.sel}"]`);
+      KLOG.push({
+        key: ev.key,
+        tgt: `${t && t.tagName ? t.tagName : '?'}#${(t && t.id) || ''}`,
+        sel: g.sel,
+        val: el ? el.dataset.value : '<无节点>',
+        steps: Number((String(text(D().steps)).match(/\d+/) || ['<无量>'])[0]),
+        dp: ev.defaultPrevented,
+        scrollY: w.scrollY,
+      });
+    });
+  };
+  const takeKlog = () => KLOG.splice(0, KLOG.length);
+
+  /** 每键一行的对账：期望来自 kbOracle（派发**之前**就算好），实测来自 KLOG。 */
+  const perKeyRows = (tag, want, got) => {
+    const bad = [];
+    let n = 0;
+    for (let i = 0; i < want.length; i++) {
+      const g = got[i];
+      const okShape = !!g && g.key === want[i].key && g.sel === want[i].sel &&
+        g.val === want[i].val && g.steps === want[i].steps;
+      n++;
+      ck(`${tag}#${i} ${want[i].key} ⇒ 选中格=${want[i].sel} 显示值=${want[i].val} 手数=${want[i].steps}`,
+        okShape, g ? `实测 key=${g.key} sel=${g.sel} val=${g.val} steps=${g.steps}` : '这一键页内没有读数');
+      if (!okShape) bad.push(`${i}:${want[i].key}`);
+    }
+    ck(`${tag} 派发数与页内抄到的 keydown 数逐键相同（多一处绑定 / 少一次派发都会在这儿红）`,
+      got.length === want.length, `页内 ${got.length} 条 / 派发 ${want.length} 条 · 不合 ${bad.slice(0, 6).join(' ')}`);
+    return n;
+  };
+
+  // ================================================== 场景 D · 真键盘通道（键盘腿）
+  /**
+   * 四段，段与段之间必须换回合，因为**焦点是页外状态**（node 派发中间页面对不了焦点）：
+   *   回合 0 证人（visibilityState / activeElement 显式钉在 #board）+ 算好三段的全部期望
+   *   回合 1 认 A 段（15 次方向键的逐键期望轨迹）+ 认 preventDefault（scrollY 与 defaultPrevented）
+   *   回合 2 焦点显式送进 #seed（INPUT）派发**同一串**方向键 ⇒ 失灵段：每键 sel 一步不许动
+   *   回合 3 焦点拔回 #board，认 C 段（回巢方向键 + = + / + / ⌫ / ⌫ / - / ⌫ 的逐键格值与手数）
+   * 全程不调 hidato.press() / place() / nudge() / erase() / move()：唯一写盘的通道是派发进来的键。
+   */
+  const KB_A = ['ArrowRight', 'ArrowRight', 'ArrowRight', 'ArrowRight', 'ArrowRight', 'ArrowRight',
+    'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown',
+    'ArrowLeft', 'ArrowLeft', 'ArrowUp', 'ArrowUp', 'ArrowDown'];
+  const KB_C = ['=', '=', '+', 'Backspace', 'Backspace', '-', 'Backspace'];
+  let KB = null;
+  let KB_STRAY = '';                       // 钉焦点**之前** activeElement 的实测值（证人，不是标签）
+  let KB_PINNED = '';                      // 钉完之后的实测值
+  let KB_OBS = [];                         // A 段每次按键后实测到的选中格轨迹
+
+  const keyboard = async (ctx) => {
+    const round = (ctx && ctx.round) || 0;
+    const E = exp();
+    if (!E || !E.ok) { ck('键盘腿的期望（题面与几何）由 node 证人交回', false, String(w.__expectRaw).slice(0, 160)); return report(); }
+    installKeyRecorder();
+    const ae = () => document.activeElement || {};
+    const pin = (el) => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); el.focus({ preventScroll: true }); };
+
+    if (round === 0) {
+      // 键盘腿必须**自带前置**：一个 profile 只在一个 URL 形态之内共用，形态里六条腿吃同一份
+      // localStorage ⇒ pointer 那条走完的 5x5/h0 会被这儿当存档续上，"这一格是空的""手数从 0 起"
+      // 全部错位（真跑一次默认清单就红 30 条）。所以先清档、再按 node 证人重出一张没被写过的盘。
+      // open() 是**开局**动词不是落子动词：本腿要被测的写盘通道只有一个 —— node 派发进来的键。
+      const wiped = H().gate.wipeSave();
+      ck('起步先把档清掉（wipeSave 读回 null，且新 profile 之外不欠任何前提）',
+        wiped === null && localStorage.getItem('hidato.save.v1') === null, String(wiped));
+      H().open(E.tier, E.seed, false);
+      const st = S();
+      ck('键盘腿起步就是证人那张盘（?tier=&seed= 定盘，指纹逐字节 = node 侧）',
+        !!st && st.tier === E.tier && st.seed === E.seed && st.fingerprint === E.fingerprint,
+        st ? `${st.tier}/${st.seed}/${st.fingerprint}` : 'state() 为空');
+      if (!st) return report();
+      ck('起步这张盘玩家一格都没写（mine=0 / steps=0 / entries 全 00）',
+        st.counts.mine === 0 && st.steps === 0 && st.entries === '00'.repeat(E.n),
+        `mine=${st.counts.mine} steps=${st.steps} entries=${st.entries.slice(0, 16)}…`);
+      // ① 证人先行（焦点不显式钉住 ⇒ 同一条键盘通道读数在 0/2/7 之间跳）
+      // 诚实口径：这一条验的是 **playtest 自己那记可见性覆写在位**（arm() 用 defineProperty 把
+      // document.hidden/visibilityState 改回来过，headless 默认报 hidden，等重绘的回合会对着一个
+      // 假装在后台的 tab 超时）。它**不是**"浏览器真觉得这个 tab 可见"的证人。真到页面的证据在
+      // 后面那两条硬的：逐键 ev.target 一律读到 DIV#board，且逐键选中格轨迹与题面模型逐键一致。
+      ck('playtest 的可见性覆写在位（真派发到了页面由 ev.target 与逐键轨迹那两条兜）',
+        document.visibilityState === 'visible', document.visibilityState);
+      ck('document.readyState === "complete"（脚本还在爬的时候 window 上还没有 onKey）',
+        document.readyState === 'complete', document.readyState);
+      const stray = ae();
+      KB_STRAY = `${stray.tagName || '?'}#${stray.id || ''}`;
+      ck('钉焦点前记下现场（activeElement 是谁都被抄进 extra；不靠上一步点击的副产品）',
+        !!stray.tagName, JSON.stringify(stray.tagName) + '#' + (stray.id || ''));
+      pin($('#board'));
+      ck('焦点被**显式**钉在 #board（DIV tabindex=0，不是 INPUT/SELECT/TEXTAREA）',
+        ae().tagName === 'DIV' && ae().id === 'board', `${ae().tagName}#${ae().id}`);
+      KB_PINNED = `${ae().tagName}#${ae().id}`;
+      ck('#board 焦点没把页面滚走（focus 之前 scrollY 也是 0）', w.scrollY === 0, `scrollY=${w.scrollY}`);
+      const se = document.scrollingElement || document.documentElement;
+      ck('这一页在键盘腿的视口里**真的可滚**（scrollY===0 那条不是白断言）',
+        se.scrollHeight > w.innerHeight + 1, `scrollHeight=${se.scrollHeight} innerHeight=${w.innerHeight}`);
+
+      const start = E.clues.length ? (() => { const g = new Set(E.clues.map((c) => c.cell)); for (let c = 0; c < E.n; c++) if (!g.has(c)) return c; return 0; })() : 0;
+      ck('起步选中格 = 题面里第一个非给定格（js/ui/game.js 的 firstOpen，期望由**题面**算不是抄读数）',
+        st.selected === start, `实测 ${st.selected} / 期望 ${start}`);
+      const selCount = document.querySelectorAll('#board [data-selected="1"]');
+      ck('DOM 上恰好一格带 data-selected="1"，且就是那一格（屏上读数不是影子）',
+        selCount.length === 1 && Number(selCount[0].dataset.cell) === start,
+        `${selCount.length} 格 · ${Array.from(selCount).map((e) => e.dataset.cell).join(',')}`);
+      // 阴性自证（SABOTAGE=1 ⇒ E.kbBreak===1）：把**第一个真的会动的方向键**的期望多走一步。
+      // 挑"真的会动"的那一格，是为了不让钳位把这条负样本吞掉（触边时多走一步与少走一步同格 ⇒ 假阴性）。
+      // 期望的输入：**只有题面**的冻结视图（R/C/n/clues）。真解 solution 与指纹都不在里面，
+      // 所以"键盘的期望抄了答案"这件事在这条腿里是结构上不可能的，不靠 code review 保证。
+      const KB_PV = Object.freeze({
+        R: E.R, C: E.C, n: E.n,
+        clues: Object.freeze(E.clues.map((c) => Object.freeze({ v: c.v, cell: c.cell }))),
+      });
+      let brk = -1;
+      if (E.kbBreak === 1) {
+        const probe = kbOracle(KB_PV, start, KB_A, -1);
+        for (let i = 0; i < KB_A.length; i++) {
+          const prevSel = i ? probe.per[i - 1].sel : start;
+          if (KEY_DRIFT[KB_A[i]] && probe.per[i].sel !== prevSel) { brk = i; break; }
+        }
+        ck('阴性自证接线生效：期望轨迹里被故意打断的那一格找得到（找不到就是旋钮没接上）',
+          brk >= 0, `brk=${brk}`);
+      }
+      const planA = kbOracle(KB_PV, start, KB_A, brk);
+      KB = { pv: KB_PV, E, start, brk, planA, planC: null, deadSel: planA.end, keysTotal: 0, deadSteps: 0, deadTgts: [], traceA: KB_A.length + 1 };
+      ck('起始格 + A 段轨迹长度 = 键数 + 1（每次按键前后都有读数）',
+        KB.traceA === KB_A.length + 1, `${KB.traceA} vs ${KB_A.length + 1}`);
+      ck('A 段这条序列确实压到了盘边（模型侧证人：触边 ≥ 1 次）',
+        planA.stalled >= 1, `触边 ${planA.stalled} 次`);
+      ck('键盘期望吃的是**只有题面**的冻结视图（solution 这个键根本不在输入里 ⇒ 结构上抄不了答案）',
+        Object.isFrozen(KB_PV) && !('solution' in KB_PV) && !('fingerprint' in KB_PV) &&
+        KB_PV.clues.every((c) => Object.isFrozen(c)),
+        JSON.stringify(Object.keys(KB_PV)) + ' · clues 冻结 ' + KB_PV.clues.every((c) => Object.isFrozen(c)));
+      takeKlog();                                        // 钉焦点不算派发：把可能的噪声清空
+      return { pendingKeys: KB_A.map((key) => ({ key })), stage: 'arrows' };
+    }
+
+    if (round === 1) {
+      const got = takeKlog();
+      perKeyRows('键盘A方向键', KB.planA.per, got);
+      KB_OBS = got.map((g) => g.sel);
+      ck('A 段每一键都被页面处理过（defaultPrevented 逐键为真）',
+        got.length > 0 && got.every((g) => g.dp === true), got.filter((g) => !g.dp).map((g) => g.key).join(' '));
+      ck('A 段每一键派发目标都是 #board（ev.target 是 DIV ⇒ 守卫放行）',
+        got.length > 0 && got.every((g) => g.tgt === 'DIV#board'), Array.from(new Set(got.map((g) => g.tgt))).join(' '));
+      ck('方向键一路按下来 window.scrollY 始终是 0（preventDefault 的正面证据）',
+        w.scrollY === 0 && got.every((g) => g.scrollY === 0), `末尾 ${w.scrollY} · 中途 ${got.filter((g) => g.scrollY !== 0).length} 次非 0`);
+      ck('方向键不许写盘：A 段之后手数还是 0（走了 15 步也没污染存档）',
+        S().steps === 0, S().steps);
+      const stEnd = S();
+      ck('A 段末尾选中格 = 期望轨迹的最后一步（模型与页面到这儿还逐键一致）',
+        stEnd.selected === KB.planA.end, `${stEnd.selected} vs ${KB.planA.end}`);
+      // ④ 负例：焦点在 INPUT 里 ⇒ 同一串键必须失灵
+      pin($('#seed'));
+      ck('焦点被**显式**送进 #seed（INPUT；ev.target 守卫的分支）',
+        ae().tagName === 'INPUT' && ae().id === 'seed', `${ae().tagName}#${ae().id}`);
+      KB.deadSel = stEnd.selected;
+      KB.keysTotal = got.length;
+      return { pendingKeys: KB_A.map((key) => ({ key })), stage: 'dead-input' };
+    }
+
+    if (round === 2) {
+      const got = takeKlog();
+      ck('失灵段派发数 = 页内抄到的 keydown 数（派发真的走焦点，不是页内自己演的）',
+        got.length === KB_A.length, `页内 ${got.length} / 派发 ${KB_A.length}`);
+      let dead = 0;
+      for (let i = 0; i < KB_A.length; i++) {
+        const g = got[i];
+        ck(`失灵段#${i} ${KB_A[i]} ⇒ 选中格一步没动（仍在 ${KB.deadSel}）且 target=INPUT#seed`,
+          !!g && g.sel === KB.deadSel && g.tgt === 'INPUT#seed',
+          g ? `实测 sel=${g.sel} target=${g.tgt}` : '页内没有这条读数');
+        if (g && g.sel === KB.deadSel && g.tgt === 'INPUT#seed') dead++;
+      }
+      ck('失灵段每一键都没被 preventDefault（守卫 return 在 preventDefault 之前 ⇒ 浏览器留着默认行为）',
+        got.length > 0 && got.every((g) => g.dp === false), got.filter((g) => g.dp).map((g) => g.key).join(' '));
+      ck(`失灵段确认过的步数 = ${KB_A.length}（负例自己也要交条数，不许只用一个布尔盖）`,
+        dead === KB_A.length, `${dead} / ${KB_A.length}`);
+      KB.deadSteps = dead;
+      KB.deadTgts = Array.from(new Set(got.map((g) => g.tgt)));
+      pin($('#board'));
+      ck('焦点从 INPUT 里拔回 #board（别污染后面的断言）',
+        ae().tagName === 'DIV' && ae().id === 'board', `${ae().tagName}#${ae().id}`);
+      const keysC = homeKeys(KB.deadSel, KB.start, E.C).concat(KB_C);
+      KB.planC = kbOracle(KB.pv, KB.deadSel, keysC, -1);   // 阴性自证只打 A 段那一条轨迹
+      return { pendingKeys: keysC.map((key) => ({ key })), stage: 'write' };
+    }
+
+    // 回合 3：C 段逐键对账 + 摊账
+    const got = takeKlog();
+    perKeyRows('键盘C写键', KB.planC.per, got);
+    ck('C 段派发目标一律是 #board（回巢方向键与写键同一焦点）',
+      got.length > 0 && got.every((g) => g.tgt === 'DIV#board'), Array.from(new Set(got.map((g) => g.tgt))).join(' '));
+    const st = S();
+    ck('C 段末尾回到 firstOpen 那一格（期望由题面算，不是抄页面读数）',
+      st.selected === KB.start, `${st.selected} vs ${KB.start}`);
+    const last = KB.planC.per[KB.planC.per.length - 1];
+    ck('C 段最后一次的格值与手数等于模型值（DOM/模型/state 三方在此合流）',
+      Number(cellEl(KB.start).dataset.value) === Number(last.val) && st.steps === last.steps,
+      `DOM ${cellEl(KB.start).dataset.value} / 模型 ${last.val} · state.steps ${st.steps} / 模型 ${last.steps}`);
+    ck('末尾 #stat-filled 与人手读数同口径（DOM 层的独立证人）',
+      text(D().filled).replace(/\s+/g, ' ') === `已填 ${E.clueCount}/${E.n}（印着 ${E.clueCount} · 你写 0）`,
+      text(D().filled));
+    ck('全程 window.scrollY 仍是 0（三段按下来一次也没滚页）', w.scrollY === 0, `scrollY=${w.scrollY}`);
+    ck('三段派发数各自交回得清：A 段 15、失灵段 15、C 段等于 C 段期望轨迹长度',
+      KB.keysTotal === KB_A.length && KB.deadSteps === KB_A.length && got.length === KB.planC.per.length,
+      `A ${KB.keysTotal} · B ${KB.deadSteps} · C ${got.length}`);
+    ck('C 段的期望也吃同一张**只有题面**的冻结视图（回巢步数 = 行列差的绝对值和）',
+      !('solution' in KB.pv) && homeKeys(KB.deadSel, KB.start, KB.pv.C).length ===
+      Math.abs(Math.floor(KB.start / KB.pv.C) - Math.floor(KB.deadSel / KB.pv.C)) + Math.abs((KB.start % KB.pv.C) - (KB.deadSel % KB.pv.C)),
+      `回巢 ${homeKeys(KB.deadSel, KB.start, KB.pv.C).length} 步 · 行差 ${Math.abs(Math.floor(KB.start / KB.pv.C) - Math.floor(KB.deadSel / KB.pv.C))} 列差 ${Math.abs((KB.start % KB.pv.C) - (KB.deadSel % KB.pv.C))}`);
+    const raw = JSON.parse(H().gate.saveRaw() || '{}');
+    ck('键盘写出来的手确实落了盘（存档 entries 与 state() 逐字相同）',
+      raw.entries === st.entries, `${String(raw.entries).slice(0, 12)}… vs ${st.entries.slice(0, 12)}…`);
+    const out = report({
+      tier: E.tier, seed: E.seed,
+      keysTotal: KB.keysTotal + got.length + KB_A.length,
+      traceLen: KB.traceA,
+      deadSegmentConfirmed: KB.deadSteps,
+      arrowsDispatched: KB_A.length, writeDispatched: got.length,
+      selStart: KB.start, selEndA: KB.planA.end, selFinal: st.selected,
+      selTraceExpected: KB.planA.per.map((p) => p.sel),
+      selTraceObserved: KB_OBS,
+      stalledInModel: KB.planA.stalled,
+      boundaryProbeValue: last.val, stepsFinal: st.steps,
+      scrollY: w.scrollY,
+      focusBeforePin: KB_STRAY, focusPinned: KB_PINNED,
+      deadSegmentTargets: KB.deadTgts,
+      sabotageBreakAt: KB.brk, fingerprint: st.fingerprint,
+    });
+    KB = null;
+    return out;
+  };
+
+  // ============================================= 场景 E · 跨**真刷新**续玩（resume 腿）
+  /**
+   * 为什么这条腿必须走 Page.reload 而不是同文档片段导航：
+   * 同文档只换 `#hash` 时 window.hidato 还活着、store.load() 一次都没跑，
+   * "恢复了"其实是"什么都没丢"——那是续局闸最经典的假绿。
+   * 铁证三条，全在回合 2 里：① node 派发刷新**之前**在页外取的 timeOrigin/href/state 与刷新后不同/对得上；
+   * ② node 设在 window 上的哨兵串在刷新后读不到了（JS 上下文真的没了）；
+   * ③ 新文档的 boot.requested 落在存档那一档上，而存档的档位**故意不等于默认档位**
+   *   （默认是 TIERS[0]=5x5/h0，这一腿写的是 6x6/m1 ⇒ 续出来的盘不可能是"默认值恰好一样"）。
+   */
+  let RS = null;
+  const resume = async (ctx) => {
+    const round = (ctx && ctx.round) || 0;
+    const E = exp();
+    if (!E || !E.ok) { ck('续局腿的期望（题面与几何）由 node 证人交回', false, String(w.__expectRaw).slice(0, 160)); return report(); }
+    installKeyRecorder();
+    const store = await mod('./js/store.js');
+
+    if (round === 0) {
+      const st0 = S();
+      ck('续局腿起步无 URL 查询串（盘只能来自默认或存档）', location.search === '', `search=${location.search}`);
+      const wiped = H().gate.wipeSave();
+      ck('本腿先把存档清干净（腿内自带前置，不吃上一条腿写的档），wipeSave 读回 null',
+        wiped === null && localStorage.getItem(store.SAVE_KEY) === null, String(wiped));
+      const opened = H().open(E.tier, E.seed, false);
+      const st = S();
+      ck('hidato.open() 交回 summary（它**没有 ok 字段**：成败读 state()，别把成功读成失败）',
+        !!opened && opened.tier === E.tier && !('ok' in opened), JSON.stringify(opened).slice(0, 120));
+      ck('换到的那一档**不等于默认档**（续局读数才有出处）',
+        E.tier !== H().tiers[0].key && E.seed !== 'h0', `${E.tier}/${E.seed} vs 默认 ${H().tiers[0].key}/h0`);
+      ck('换档后 state() 就是证人那张盘（指纹逐字节 = node 侧 witness）',
+        !!st && st.fingerprint === E.fingerprint && st.tier === E.tier && st.seed === E.seed,
+        st ? `${st.tier}/${st.seed}/${st.fingerprint} vs ${E.fingerprint}` : 'state() 为空');
+      if (!st) return report();
+      ck('起步玩家一格都没写（entries 全 00）', st.entries === '00'.repeat(E.n), st.entries.slice(0, 24));
+      RS = { E, start: st.selected, keys: ['=', '=', 'ArrowRight', 'ArrowDown'], plan: null };
+      RS.plan = kbOracle(Object.freeze({ R: E.R, C: E.C, n: E.n, clues: E.clues }), RS.start, RS.keys, -1);
+      takeKlog();
+      return { pendingKeys: RS.keys.map((key) => ({ key })), stage: 'play' };
+    }
+
+    if (round === 1) {
+      const got = takeKlog();
+      perKeyRows('续局真键盘', RS.plan.per, got);
+      const st = S();
+      ck('真键盘打了几步之后玩家确实有手（两笔都写在同一个选中格上 ⇒ mine=1、手数=2）',
+        st.counts.mine === 1 && st.steps === RS.plan.per[RS.plan.per.length - 1].steps && st.steps === 2,
+        `mine=${st.counts.mine} steps=${st.steps} 期望 steps=${RS.plan.per[RS.plan.per.length - 1].steps}`);
+      const raw = localStorage.getItem(store.SAVE_KEY);
+      ck(`${store.SAVE_KEY} 被写了（刷新前证人之一）`, typeof raw === 'string' && raw.length > 0, String(raw).slice(0, 80));
+      let obj = null;
+      try { obj = JSON.parse(raw || 'null'); } catch { obj = null; }
+      ck('存档里的 entries/steps/hints 与 state() 逐字相同（档是活的，不是上一次的历史）',
+        !!obj && obj.entries === st.entries && obj.steps === st.steps && obj.hints === st.hints,
+        JSON.stringify(obj).slice(0, 200));
+      ck('#save-note 念出的正是这一档（键名在句首，用户 Ctrl-F 也命中）',
+        text(D().saveNote).indexOf(store.SAVE_KEY) === 0 &&
+        text(D().saveNote).indexOf(`盘号 ${st.seed} · ${st.steps} 手 · ${st.hints} 次提示`) > 0,
+        text(D().saveNote).slice(0, 160));
+      // 阴性自证（PLANT_TRUTH=1）：把 node 侧真值**当场写进 localStorage**，让刷新后那两条扫描必须抓到。
+      if (E.plant === 1) {
+        const plantedKey = 'hidato.plantprobe';
+        localStorage.setItem(plantedKey, E.solution.slice(1).join(','));
+        ck('阴性自证：真值被当场写进 localStorage（写了才算，写不进就是旋钮没接上）',
+          localStorage.getItem(plantedKey) === E.solution.slice(1).join(','), String(plantedKey));
+      }
+      // 把刷新前的读数交给 node（node 自己还会另取一份 timeOrigin/href/state 作独立证人）。
+      RS.pre = {
+        tier: st.tier, seed: st.seed, entries: st.entries, steps: st.steps, hints: st.hints,
+        selected: st.selected, fingerprint: st.fingerprint, mine: st.counts.mine,
+      };
+      return Object.assign({
+        reload: E.fakeReload === 1 ? `fragment:${location.href}#resume-probe` : 1,
+        stage: 'reload', pre: RS.pre, carry: { keysDone: RS.keys.length, start: RS.start },
+      }, drain());
+    }
+
+    // 回合 2：刷新之后。ctx.carry.pre = **node 自己在派发刷新之前用 Runtime.evaluate 取的**刷新前证人；
+    // ctx.carry.pageReported = 上一回合页面交回的那份（两份必须逐字相同 ⇒ 页面没在对自己演戏）。
+    const carry = (ctx && ctx.carry) || {};
+    const pre = carry.pre || null;
+    ck('刷新前证人由 node 带回来了（不是页面在同一个上下文里自己跟自己对表）', !!pre && typeof pre.entries === 'string', JSON.stringify(carry).slice(0, 200));
+    if (!pre) return report();
+    ck('node 那份证人里带着它在旧上下文里设的哨兵串（派发前它确实跑进了那个文档）',
+      typeof pre.sentinel === 'string' && pre.sentinel.length > 0, String(pre.sentinel));
+    ck('node 取的刷新前读数与页面自己交回的读数逐字相同（两条通道在刷新前就合流）',
+      !!carry.pageReported && carry.pageReported.entries === pre.entries &&
+      carry.pageReported.steps === pre.steps && carry.pageReported.seed === pre.seed &&
+      carry.pageReported.tier === pre.tier && carry.pageReported.fingerprint === pre.fingerprint,
+      JSON.stringify(carry.pageReported).slice(0, 200));
+    const st = S();
+    ck('新文档里 window.hidato 又起来了（state() 有读数）', !!st, 'null');
+    if (!st) return report({ href: location.href });
+    // ① node 设在旧上下文里的哨兵：同文档跳转它一定还在
+    ck('node 在刷新前设的 window 哨兵在新文档里读不到了（**新 JS 上下文**的铁证；片段跳转它还在 ⇒ 这条红）',
+      w.__hidatoPreReloadSentinel === undefined, String(w.__hidatoPreReloadSentinel));
+    const nowOrigin = String(performance.timeOrigin);
+    const nowHref = location.href;
+    ck('performance.timeOrigin 与 node 带回来的旧值**不同**（新文档的第二条铁证）',
+      nowOrigin !== pre.timeOrigin, `刷新前 ${pre.timeOrigin} / 刷新后 ${nowOrigin}`);
+    ck('hidato.doc.timeOrigin 报的就是当前文档那个（模块是重新求值的，不是抄的旧值）',
+      H().doc.timeOrigin === nowOrigin, `${H().doc.timeOrigin} vs ${nowOrigin}`);
+    ck('旧文档里 node 读到的 hidato.doc.timeOrigin 就等于旧文档的 performance.timeOrigin（页面那栏没撒谎）',
+      pre.docTimeOrigin === pre.timeOrigin, `${pre.docTimeOrigin} vs ${pre.timeOrigin}`);
+    ck('location.href 与刷新前逐字相同且 hash 为空（片段导航偷改 href ⇒ 这条红）',
+      nowHref === pre.href && location.hash === '', `刷新前 ${pre.href} / 刷新后 ${nowHref} hash=${location.hash}`);
+    ck('hidato.doc.href 与 location.href 一致', H().doc.href === nowHref, H().doc.href);
+    // ② 续的是档，不是默认值
+    const b = H().boot || {};
+    ck('boot.hasSaveAtBoot === true（文档加载时确实读到了档）', b.hasSaveAtBoot === true, JSON.stringify(b));
+    ck('boot.resumed === true（openBoard 真的 decode 了存档；同文档跳转它不会翻）',
+      b.resumed === true, JSON.stringify(b));
+    ck('boot.requested 落在**存档那一档**上，且它不等于默认档（URL 没带查询串 ⇒ 出处只有存档）',
+      b.requested && b.requested.tier === pre.tier && b.requested.seed === pre.seed &&
+      b.requested.tier !== H().tiers[0].key, JSON.stringify(b.requested));
+    // ③ 逐格对账
+    eq('档位与刷新前一致', st.tier, pre.tier);
+    eq('盘号原样续上（不是日期算的）', st.seed, pre.seed);
+    eq('手数量与刷新前一致', st.steps, pre.steps);
+    eq('提示数与刷新前一致', st.hints, pre.hints);
+    eq('重生成的出货盘指纹 = node 侧 witness（逐字节）', st.fingerprint, E.fingerprint);
+    eq('题面条数 = node 侧', st.clueCount, E.clueCount);
+    ck('这一盘仍通过页面自己的验收（proven=true）', st.proven === true, JSON.stringify(st.proof).slice(0, 240));
+    // 逐格对账。注意两个口径别混：存档 entries 里**印着的格恒为 00**（题面不落盘，见 js/store.js），
+    // 而 DOM 的 data-value 上印着的格带着题面那个数 ⇒ 给定格的 DOM 证人要对的是题面，不是 entries。
+    const printedVal = {};
+    for (const cl of E.clues) printedVal[cl.cell] = cl.v;
+    let cellBad = 0, restored = 0, givenSeen = 0;
+    for (let c = 0; c < E.n; c++) {
+      const was = parseInt(pre.entries.substr(c * 2, 2), 16);
+      const now = parseInt(st.entries.substr(c * 2, 2), 16);
+      const el = document.querySelector(`#board [data-cell="${c}"]`);
+      const domVal = el ? Number(el.dataset.value) : -1;
+      const printed = printedVal[c] !== undefined;
+      const domOk = printed ? (domVal === printedVal[c] && el.dataset.given === '1') : domVal === now;
+      if (printed) givenSeen++;
+      if (was !== now || !domOk) cellBad++;
+      if (was > 0) restored++;
+      if (was > 0 || c < 3) ck(`第 ${c} 格恢复值逐个相同（${printed ? '印着的格按题面口径对' : '玩家格 DOM 显示同一个数'}）`,
+        was === now && domOk, `刷新前 ${was} / 刷新后 ${now} / DOM ${domVal}${printed ? ` / 题面 ${printedVal[c]}` : ''}`);
+    }
+    ck(`${E.n} 格 entries 逐格对完：不合 0 格（其中题面 ${givenSeen} 格）`, cellBad === 0, `不合 ${cellBad} 格`);
+    ck('刷新前玩家写过的格确实一格不丢（非空计数相同）', restored === st.counts.mine && restored === pre.mine, `${restored} vs ${st.counts.mine}`);
+    ck('存档解回来的那几手是真键盘写的那几手（entries 与 node 带回来的串逐字相同）',
+      st.entries === pre.entries, `${st.entries.slice(0, 16)}… vs ${pre.entries.slice(0, 16)}…`);
+    ck('续玩之后选中格回落到 firstOpen（decode 的口径，不是刷新前那个光标位）',
+      st.selected === (() => { const g = new Set(E.clues.map((c2) => c2.cell)); for (let c = 0; c < E.n; c++) if (!g.has(c)) return c; return 0; })(),
+      `${st.selected}`);
+    // ④ 给定格仍只读
+    const gc = E.clues[0].cell;
+    const gv = E.clues[0].v;
+    const gv2 = (() => { const s = new Set(E.clues.map((c) => c.v)); for (let v = 1; v <= E.n; v++) if (!s.has(v)) return v; return null; })();
+    const blocked = H().place(gc, gv2);
+    ck('刷新后给定格仍然只读：place() 交回 why:given-cell',
+      !!blocked && blocked.ok === false && blocked.why === 'given-cell', JSON.stringify(blocked));
+    const gEl = document.querySelector(`#board [data-cell="${gc}"]`);
+    ck('那一格 DOM 上还带着 data-given="1" 且显示印着的数（刷新没把题面洗成玩家的手）',
+      gEl && gEl.dataset.given === '1' && Number(gEl.dataset.value) === gv && gEl.textContent === String(gv),
+      gEl ? `${gEl.dataset.given}/${gEl.dataset.value}/${gEl.textContent}` : '节点不存在');
+    const givenErase = H().game.select(gc) && H().erase();
+    ck('给定格连 ⌫ 那条动词也清不掉（why:given-cell；题面在新文档里仍然是题面）',
+      !!givenErase && givenErase.ok === false && givenErase.why === 'given-cell', JSON.stringify(givenErase));
+    H().game.select(pre.selected >= 0 ? pre.selected : 0);
+    // ⑤ 落盘卫生
+    const lsKeys = Object.keys(localStorage);
+    ck(`localStorage 除 ${store.SAVE_KEY} 以外没有别的键（真值不落盘这条在**新文档**里重认一遍）`,
+      lsKeys.length === 1 && lsKeys[0] === store.SAVE_KEY, JSON.stringify(lsKeys));
+    const rawStr = localStorage.getItem(store.SAVE_KEY) || '';
+    let obj = null;
+    try { obj = JSON.parse(rawStr); } catch { obj = null; }
+    ck('存档字段名 ⊂ 白名单（多一个键就红）',
+      !!obj && Object.keys(obj).every((f) => store.SAVE_FIELDS.indexOf(f) >= 0),
+      `在档 ${obj ? JSON.stringify(Object.keys(obj)) : '读不开'} / 白名单 ${JSON.stringify(store.SAVE_FIELDS)}`);
+    ck('存档里没有答案味的字段名（js/store.js 的 ANSWERISH 当场用它自己扫自己）',
+      !store.ANSWERISH.test(rawStr) && lsKeys.every((k) => !store.ANSWERISH.test(k)), rawStr.slice(0, 120));
+    const forms = [E.solution.join(','), E.solution.slice(1).join(','), (() => {
+      const byCell = new Array(E.n).fill(-1);
+      for (let v = 1; v <= E.n; v++) byCell[E.solution[v]] = v;
+      return byCell.join(',');
+    })()];
+    ck('localStorage 全键全值里扫不到 node 侧真值的任何一种拼法',
+      lsKeys.every((k) => forms.every((f) => (localStorage.getItem(k) || '').indexOf(f) < 0)),
+      `扫了 ${lsKeys.length} 个键 · 形态 ${forms.length} 种`);
+    ck('#save-note 在新文档里念的是续上的那一档',
+      text(D().saveNote).indexOf(store.SAVE_KEY) === 0 && text(D().saveNote).indexOf(`盘号 ${pre.seed} · ${pre.steps} 手`) > 0,
+      text(D().saveNote).slice(0, 160));
+    const out = report({
+      tier: st.tier, seed: st.seed, entriesCells: E.n, restoredCells: restored,
+      steps: st.steps, hints: st.hints, mine: st.counts.mine,
+      timeOriginChanged: nowOrigin !== pre.timeOrigin,
+      hrefUnchanged: nowHref === pre.href, sentinelCleared: w.__hidatoPreReloadSentinel === undefined,
+      reloadMode: carry.reloadMode || 'none（node 没派发刷新）',
+      keysDispatchedBeforeReload: carry.keysDone,
+      _timeOriginBefore: pre.timeOrigin, _timeOriginAfter: nowOrigin,
+      fingerprint: st.fingerprint, href: nowHref,
+    });
+    RS = null;
+    return out;
+  };
+
+  w.__scn = { boot, crossengine, pointer, keyboard, resume };
 })(window);

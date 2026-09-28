@@ -14,9 +14,15 @@
 //   node tools/playtest.cjs open <url>              新开一个 tab，打印启动期 console
 //   node tools/playtest.cjs eval '<expr>' [nonav]   求值（await promise），打印结果
 //   node tools/playtest.cjs scenario <名> [json]    注入 tools/scenarios.js，跑 __scn.<名>()
-//   node tools/playtest.cjs interact <名> [json]    同上，但走 **CDP 真指针**多回合：
+//   node tools/playtest.cjs interact <名> [json]    同上，但走 **CDP 真指针 / 真按键 / 真刷新**多回合：
 //                                                   页面交回 {pending:[{x,y}…]} ⇒ 本机用
-//                                                   Input.dispatchMouseEvent 点下去，再回来跑下一回合
+//                                                   Input.dispatchMouseEvent 点下去；
+//                                                   页面交回 {pendingKeys:[{key}…]} ⇒ 本机用
+//                                                   Input.dispatchKeyEvent 按下去（键盘腿唯一通道）；
+//                                                   页面交回 {reload:1} ⇒ 本机**先取刷新前证人**再 Page.reload
+//                                                   （续局腿唯一通道；reload:'fragment:…' 只给阴性自证用）；
+//                                                   页面交回 {carry:{…}} ⇒ 由 node 保管并在下一回合送回
+//                                                   再回来跑下一回合
 //   node tools/playtest.cjs witness <tier> <seed>   **node 侧证人**（不起 Chrome）：用浏览器加载的
 //                                                   同一批 js/ 模块现算那张盘的出货指纹 / 真解 / 裁判读数
 //   node tools/playtest.cjs shot <file.png>
@@ -294,12 +300,84 @@ async function main() {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, buttons: 0 }, sessionId);
   };
 
+  /**
+   * key 名 → CDP 需要的 code / 虚拟键码 / text。走的是 Chrome 自己那套 WebKitKeyboardCodes，
+   * 派发进来的事件 isTrusted=true、target = document.activeElement —— 这才叫**真键盘通道**：
+   * 页面的 INPUT/SELECT 守卫读的是 ev.target，而 ev.target 由浏览器的焦点系统决定，不由测试决定。
+   */
+  const KEYDESCRIPTOR = {
+    ArrowLeft: { code: 'ArrowLeft', vk: 37 },
+    ArrowUp: { code: 'ArrowUp', vk: 38 },
+    ArrowRight: { code: 'ArrowRight', vk: 39 },
+    ArrowDown: { code: 'ArrowDown', vk: 40 },
+    '=': { code: 'Equal', vk: 187, text: '=' },
+    '+': { code: 'Equal', vk: 187, text: '+', modifiers: 8 },        // Shift+＝ ⇒ key '+'
+    '-': { code: 'Minus', vk: 189, text: '-' },
+    _: { code: 'Minus', vk: 189, text: '_', modifiers: 8 },
+    Backspace: { code: 'Backspace', vk: 8 },
+    Delete: { code: 'Delete', vk: 46 },
+  };
+
+  /** 一次 CDP 真按键：keyDown（可打印键带 text，浏览器自己补 char/输入）+ keyUp。
+   *  未知键名直接抛：静默少派一个键就是假绿。 */
+  const pressKey = async (name) => {
+    const d = KEYDESCRIPTOR[name];
+    if (!d) throw new Error(`键盘腿要派的键不在表里：${JSON.stringify(name)}`);
+    const base = { key: name, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk };
+    if (d.modifiers) base.modifiers = d.modifiers;
+    const txt = d.text ? { text: d.text } : {};
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base, ...txt }, sessionId);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, sessionId);
+  };
+
+  /**
+   * 续局腿的**刷新前证人**：node 在派发 Page.reload **之前**自己跑一次 Runtime.evaluate。
+   * 只有 node 手里有这份东西，刷新后场景才可能拿到"不是这个文档给的"值 —— 同文档片段跳转冒充重载
+   * 那一类假绿就死在这一句上（页面自己报的读数它也能报对，node 取的这份它报不出新的 timeOrigin）。
+   * 顺手把哨兵串设进旧上下文：新文档里读不到它 = JS 上下文真的换了。
+   */
+  const SENTINEL = '__hidatoPreReloadSentinel';
+  const preReloadWitness = async () => {
+    const raw = await evaluate(`(() => {
+      window.${SENTINEL} = ${JSON.stringify('hidato-verify-pre-reload')};
+      const s = window.hidato && window.hidato.state ? window.hidato.state() : null;
+      if (!s) throw new Error('刷新前证人取不到：window.hidato.state() 是空的');
+      return JSON.stringify({
+        sentinel: window.${SENTINEL},
+        timeOrigin: String(performance.timeOrigin),
+        href: location.href,
+        docTimeOrigin: String(window.hidato.doc.timeOrigin),
+        tier: s.tier, seed: s.seed, entries: s.entries, steps: s.steps, hints: s.hints,
+        selected: s.selected, fingerprint: s.fingerprint, mine: s.counts.mine, clueCount: s.clueCount,
+      });
+    })()`);
+    return JSON.parse(raw);
+  };
+
+  /** 一次**真**刷新：Page.reload + 等文档重新 complete + 重新上膛（新文档的 window 是空的）。 */
+  const reloadDocument = async () => {
+    await cdp.send('Page.reload', { ignoreCache: false }, sessionId);
+    for (let i = 0; i < 120; i++) {
+      const ready = await evaluate('document.readyState').catch(() => 'loading');
+      if (ready === 'complete') break;
+      await sleep(100);
+    }
+    await arm();
+  };
+
   const install = async () => {
     const src = fs.readFileSync(path.join(__dirname, 'scenarios.js'), 'utf8');
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: src }, sessionId);
     await navigate(process.env.NAV_URL || BASE);
-    // headless 会把页面报成 hidden，等重绘的场景就会对着一个假装在后台的 tab 超时；
-    // 期望值走 window.__expectRaw（原样字符串），场景里自己 JSON.parse。
+    await arm();
+  };
+
+  /**
+   * 每次导航之后重新上膛：headless 会把页面报成 hidden，等重绘的场景就会对着一个假装在后台的 tab 超时；
+   * 期望值走 window.__expectRaw（原样字符串），场景里自己 JSON.parse。
+   * **续局腿刷新之后也要走这里**：新文档的 window 是空的，__expectRaw 不上膛就没有期望值。
+   */
+  const arm = async () => {
     await evaluate(`Object.defineProperty(document,'hidden',{get:()=>false,configurable:true});
       Object.defineProperty(document,'visibilityState',{get:()=>'visible',configurable:true});
       window.__expectRaw = ${JSON.stringify(rest || 'null')}; 'ok'`);
@@ -351,9 +429,39 @@ async function main() {
     await install();
     const max = Number(process.env.MAX_ROUNDS || 12);
     let final = null;
+    let carry = null;                     // 页面交回、**node 保管**、下一回合再送回去的东西（续局的证人就走这条路）
+    let keptRows = [];                    // 刷新**前**那几回合的断言：旧文档一死页内数组就没了，靠 node 兜住
     for (let round = 0; round < max; round++) {
-      final = JSON.parse(await evaluate(call(arg, `{round:${round}}`)));
+      const ctxParts = [`round:${round}`];
+      if (carry !== null) ctxParts.push(`carry:${JSON.stringify(carry)}`);
+      final = JSON.parse(await evaluate(call(arg, `{${ctxParts.join(',')}}`)));
+      if (final.carry) carry = Object.assign({}, carry || {}, final.carry);
       const pending = final && final.pending;
+      const keys = final && final.pendingKeys;
+      if (final && final.reload) {
+        if (Array.isArray(final.rows)) keptRows = keptRows.concat(final.rows);   // 交回来的断言先收下再刷新
+        // 刷新**之前**先在旧上下文里取证人（node 自己取的那一份，页面再也报不出第二个 timeOrigin）
+        const pre = await preReloadWitness();
+        carry = Object.assign({}, carry || {}, {
+          pre, pageReported: final.pre || null,
+          reloadMode: typeof final.reload === 'string' ? 'fragment-sabotage' : 'page-reload',
+        });
+        if (typeof final.reload === 'string' && final.reload.startsWith('fragment:')) {
+          // 阴性自证专用：**同文档**片段导航（不是导航：window 还在、store.load() 一次都没跑）。
+          // 真的续局腿绝不该走到这一支；走到就是让场景那条"新文档"证人当场红。
+          await evaluate(`location.href = ${JSON.stringify(final.reload.slice('fragment:'.length))}`);
+          await sleep(200);
+        } else {
+          await reloadDocument();
+        }
+        continue;
+      }
+      if (keys && keys.length) {
+        for (const k of keys) await pressKey(String(k && k.key));
+        await sleep(60);                  // 让 keydown 处理与重画落地，再谈下一回合的读数
+        final.pendingKeysCount = (final.pendingKeysCount || 0) + keys.length;
+        continue;
+      }
       if (!pending || !pending.length) break;
       for (const p of pending) await clickAt(Number(p.x), Number(p.y));
       await sleep(80);                       // 让 click 处理与重画落地，再谈下一回合的读数
@@ -361,6 +469,11 @@ async function main() {
     }
     if (!final) throw new Error('interact 一个回合都没跑成');
     if (final.pending && final.pending.length) throw new Error(`interact 超过 ${max} 回合还没走完（还欠 ${final.pending.length} 次点击）`);
+    if (final.pendingKeys && final.pendingKeys.length) throw new Error(`interact 超过 ${max} 回合还没走完（还欠 ${final.pendingKeys.length} 次按键）`);
+    if (final.reload) throw new Error(`interact 超过 ${max} 回合还没走完（刷新那一步没走到）`);
+    // 把刷新前那几回合的断言并回来：条数是这条腿的一部分，掉了文档不能跟着掉。
+    final.rows = keptRows.concat(final.rows || []);
+    final.fail = final.rows.filter((r) => !r.pass).length;
     await emit(JSON.stringify(final));
   } else if (cmd === 'shot') {
     await cdp.send('Page.bringToFront', {}, sessionId);

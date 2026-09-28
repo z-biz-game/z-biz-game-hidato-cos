@@ -14,6 +14,12 @@
 #                                              # 部署件：只跑这一种形态，本脚本不起任何服务（归 2e）
 #   SABOTAGE=1 LEGS="crossengine" SHAPES=root bash tools/verify.sh
 #                                              # 闸的阴性自证：把 node 侧期望指纹改错一位，必须红**且 rc≠0**
+#   SABOTAGE=1 LEGS="keyboard" SHAPES=root bash tools/verify.sh
+#                                              # 键盘腿的阴性自证：期望轨迹被故意打断一格 ⇒ 那一键必红
+#   SABOTAGE=1 LEGS="resume" SHAPES=root bash tools/verify.sh
+#                                              # 续局腿的阴性自证：把"新文档"证人假装成**同文档片段跳转**
+#   PLANT_TRUTH=1 LEGS="resume" SHAPES=root bash tools/verify.sh
+#                                              # 续局腿的阴性自证第二把：真值当场写进 localStorage ⇒ 落盘扫描必抓
 #
 # 为什么前缀形态必须单跑一遍而不是写进脚注：根形态是唯一一种能被本地服务器"蒙对"的形态。
 # 页面级 `/js/...` 说明符在仓库=文档根时解得开，挂在 /<repo>/ 下就 404；而抛出来的 dynamic import
@@ -48,8 +54,11 @@ PLANT_TRUTH=${PLANT_TRUTH:-0}        # 阴性自证第二把：把真值当场�
 BOOT_TIER=5x5; BOOT_SEED=h0
 URL_TIER=6x6; URL_SEED=m1
 PLAY_TIER=5x5; PLAY_SEED=h0                 # 场景 B 那张走完的 5×5（15 个非给定格）
-# 每条形态的腿清单（本回合 4 条；键盘/续局/canary/移动端腿归 2d）。少交一回结果就是悄悄少跑。
-LEGS_DONE=${LEGS:-"boot-default boot-url crossengine pointer"}
+RESUME_TIER=6x6; RESUME_SEED=m1             # 续局腿刻意换一档：它**不等于**默认档（js/main.js 的
+#   DEFAULT_TIER=TIERS[0]=5x5 / DEFAULT_SEED=h0），而续局腿的导航 URL 不带查询串 ⇒
+#   刷新后 boot.requested 落在 6x6/m1 上就只可能是**从存档读来的**，不可能是"默认值恰好撞上了"。
+# 每条形态的腿清单（本回合 6 条；canary/移动端腿归 2e）。少交一回结果就是悄悄少跑。
+LEGS_DONE=${LEGS:-"boot-default boot-url crossengine pointer keyboard resume"}
 if [ -z "$CHROME" ]; then
   for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
            "/Applications/Chromium.app/Contents/MacOS/Chromium" \
@@ -132,11 +141,16 @@ for r in rows:
         print('  FAIL %-58s %s' % (r['test'], r['detail']))
 fail = int(d.get('fail', 0))
 extra = {k: v for k, v in d.items() if k not in ('rows', 'fail')}
+# 下划线前缀的键 = **墙上时钟读数**（续局腿的 performance.timeOrigin 前后两个值就是这类）。
+# 它们必须落进 .extra.json 供复验读，但绝不能进 stdout：三连跑的判据是"两次输出逐字节 diff 为空"，
+# 而 timeOrigin 每一次刷新都换一个数。判据一条没放宽（这些值全都以"变了/没变"的断言形态被判定），
+# 只是把机器相关的读数从可 diff 的那条通道里挪出去 —— 改的是措辞，不是阈值。
+stable = {k: v for k, v in extra.items() if not k.startswith('_')}
 with open(tally, 'w') as f:
     f.write('%d %d\n' % (len(rows), fail))
 with open(extra_path, 'w') as f:
     json.dump(extra, f)
-print('  %d checks, %d failed  %s' % (len(rows), fail, json.dumps(extra, ensure_ascii=False)[:400]))
+print('  %d checks, %d failed  %s' % (len(rows), fail, json.dumps(stable, ensure_ascii=False)[:400]))
 sys.exit(1 if fail else 0)
 PARSER
 )
@@ -165,7 +179,13 @@ preflight() {
   return 0
 }
 
-start_chrome() {                  # 每一条腿一个新 profile、一个新 Chrome
+start_chrome() {                  # 每一条**形态**一个新 profile、一个新 Chrome（tag 就是形态名）
+  # 为什么按形态而不是按腿：这一形态的 localStorage 不许是上一形态写的，而 Chrome 起停是这条闸
+  # 最贵的一段（每条腿一次起停 ≈ 多烧 8 次 node/CDP 起停）。代价是同形态六条腿共用一份档，于是
+  # "谁写的档谁收尾"成了纪律：pointer/keyboard/resume 都往档里写，keyboard/resume 每条腿自己
+  # 先 gate.wipeSave()；boot-default 那条"新 profile 上无档可续"靠的是下面 run_shape 里那句
+  # 「先把 tab 停在 404 上、应用页一次都没跑过」+ 它排在清单最前。把清单换个顺序真跑过
+  # （LEGS="resume boot-default"）：boot-default 会红一片并 rc=1，是响的，不是假绿。
   local tag=$1
   UDD=$(mktemp -d "${TMPDIR:-/tmp}/hidato.${tag}.XXXXXXXX") || { echo "profile 建不起来" >&2; return 1; }
   "$CHROME" --headless=new --remote-debugging-port=$CDP --user-data-dir="$UDD" \
@@ -189,6 +209,7 @@ stop_chrome() {
 # run_leg <shape> <leg> —— 腿名到"场景 / mode / 导航 URL / node 期望"的那张表在这里，只有一处。
 run_leg() {
   local shape=$1 leg=$2 base=$3 s expect='' nav='' mode=scenario
+  local vp=$VIEWPORT                      # 默认走这一形态的视口；个别腿自己换（见 keyboard）
   s=$leg                       # 报告用的腿名；场景名在下面这张表里
   case "$leg" in
     boot-default)
@@ -212,9 +233,33 @@ run_leg() {
       nav="${base}?tier=${PLAY_TIER}&seed=${PLAY_SEED}"
       expect=$(node tools/playtest.cjs witness "$PLAY_TIER" "$PLAY_SEED") || { echo "  node 证人起不来（$PLAY_TIER/$PLAY_SEED）" >&2; RUNBAD=1; return; }
       ;;
+    keyboard)
+      # 真键盘腿：CDP Input.dispatchKeyEvent 派进来的键，页面一个 hidato.* 动词都不许调。
+      # 视口故意压到 1280×720 —— 这一页在 1024 高时不溢出，"方向键没滚页"那条断言就变成白断言；
+      # 溢出之后 scrollY 必须由 preventDefault 才守得住 0（键盘腿里另有一条证人确认它真的可滚）。
+      s=keyboard
+      mode=interact
+      vp=${KB_VIEWPORT:-1280x720}
+      nav="${base}?tier=${PLAY_TIER}&seed=${PLAY_SEED}"
+      expect=$(node tools/playtest.cjs witness "$PLAY_TIER" "$PLAY_SEED") || { echo "  node 证人起不来（$PLAY_TIER/$PLAY_SEED）" >&2; RUNBAD=1; return; }
+      # 阴性自证：把**期望轨迹**故意打断一格（真键盘不会走两步 ⇒ 那一格必红）
+      [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["kbBreak"]=1;print(json.dumps(d))')
+      ;;
+    resume)
+      # 续局腿：故意**不带查询串** —— 盘只能来自默认或存档，刷新后 boot.requested 落在存档那一档上
+      # 才是"续的是档"的正面证据。RESUME_TIER/RESUME_SEED 与默认档（5x5/h0）不同，见下面两条注释。
+      s=resume
+      mode=interact
+      nav="$base"
+      expect=$(node tools/playtest.cjs witness "$RESUME_TIER" "$RESUME_SEED") || { echo "  node 证人起不来（$RESUME_TIER/$RESUME_SEED）" >&2; RUNBAD=1; return; }
+      # 阴性自证第一把：把"新文档"这个证人**假装成同文档片段跳转**（哨兵/timeOrigin/href 三条当场红）
+      [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["fakeReload"]=1;print(json.dumps(d))')
+      # 阴性自证第二把：把 node 侧真值当场写进 localStorage，刷新后那两条落盘卫生扫描必须抓到
+      [ "$PLANT_TRUTH" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["plant"]=1;print(json.dumps(d))')
+      ;;
     *) echo "  不认识这条腿：$leg" >&2; RUNBAD=1; return ;;
   esac
-  local vp=$VIEWPORT tally extra clog n m
+  local tally extra clog n m
   tally="$LOGDIR/$shape-$s.tally"; extra="$LOGDIR/$shape-$s.extra.json"; clog="$LOGDIR/$shape-$s.console.log"
   rm -f "$tally" "$extra"
   echo "=== [$shape] $s (mode ${mode:-scenario}, viewport $vp, nav $nav) ==="
@@ -278,7 +323,11 @@ run_shape() {
   done
 
   t1=$((SECONDS - t0))
-  echo "---- shape=$shape 汇总: $REPORTED/$WANT_N legs reported · $CHECKS checks · $FAILS failed · ${t1}s ----"
+  echo "---- shape=$shape 汇总: $REPORTED/$WANT_N legs reported · $CHECKS checks · $FAILS failed ----"
+  # 墙上时间单独一行：它是**这台机器的读数**，不是闸的读数。混在汇总那一行里，
+  # "同一条命令连跑两次逐字节 diff 为空"就永远做不到（3s/4s 抖一下就差一个字节）。
+  # 判据、条数、阈值一个没动 —— 挪走的只是时钟，跟 extra 里下划线前缀那几个键同一处理。
+  echo "     本形态墙上耗时 ${t1}s（机器相关读数，不参与逐字节对账）"
   if [ "$REPORTED" != "$WANT_N" ]; then
     echo "  少了一段腿交回结果：清单要 $WANT_N 段，只收到 $REPORTED 段 —— 悄悄少跑不能算绿" >&2
     RUNBAD=1
@@ -306,7 +355,10 @@ trap cleanup EXIT
 # inside a pipeline it would hold the write end open long after the tests finished.
 # WD= inside the subshell: cleanup kills the watchdog, and a watchdog that kills itself would
 # abort its own TERM handler halfway and leave Chrome/servers behind.
-( sleep ${WD_TIMEOUT:-900}; echo "watchdog 到点：闸还没跑完" >&2; WD=; cleanup; exit 4 ) </dev/null >/dev/null 2>&1 &
+# 900s 是四条腿那一版的预算。本回合六条腿 × 两形态：键盘腿一条要 4 个回合（42 次真派发）、
+# 续局腿要两次整页启动 + 一次 Page.reload + 6x6 现生成两遍 ⇒ 每形态多烧 8 次 node/CDP 起停。
+# 按 900s 跑会在尾巴上被判"到点"，那是**看门狗替闸作了决定**，不是断言红 —— 所以把默认提到 1800。
+( sleep ${WD_TIMEOUT:-1800}; echo "watchdog 到点：闸还没跑完" >&2; WD=; cleanup; exit 4 ) </dev/null >/dev/null 2>&1 &
 WD=$!
 
 cd "$HERE"
