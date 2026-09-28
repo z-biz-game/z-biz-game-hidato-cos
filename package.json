@@ -1,0 +1,19 @@
+{
+  "name": "hidato",
+  "version": "0.1.0",
+  "description": "智渡 Hidato · 数字链 —— 在 R×C 的格子里把 1..n 排成一条王步相邻的链（5×5 / 6×6 / 7×7）。出货的每一盘都由裁判 countSolutions 穷举证明唯一解，并落在密度梯第一个「BASIC 铅笔规则推得完」的层上；band/budgetMs/nodeCap 由 tools/balance.mjs 量出来回填 TIERS，不是标签。页面无构建、零依赖、无图片音频。",
+  "type": "module",
+  "main": "server.cjs",
+  "scripts": {
+    "start": "node server.cjs",
+    "dev": "node server.cjs 5401",
+    "prefix": "PREFIX=/z-biz-game-hidato-cos PORT=5501 node server.cjs",
+    "test": "node tools/rule-test.mjs && node tools/pencil-test.mjs && SAMPLES=12 node tools/balance.mjs",
+    "portcheck": "node tools/port-check.mjs",
+    "balance": "SAMPLES=60 node tools/balance.mjs",
+    "check": "for f in $(find js tools -name '*.js' -o -name '*.mjs'); do node --check \"$f\" || exit 1; done && node --check server.cjs && echo OK"
+  },
+  "keywords": ["game", "puzzle", "hidato", "hidoku", "number-link", "hamiltonian", "unique-solution", "procedural", "web"],
+  "author": "z-biz-game",
+  "license": "MIT"
+}
