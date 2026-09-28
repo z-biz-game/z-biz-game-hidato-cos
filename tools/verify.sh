@@ -11,7 +11,7 @@
 #   LEGS="boot-url crossengine" bash tools/verify.sh
 #   WEB_PORT=5401 CDP_PORT=9401 bash tools/verify.sh
 #   BASE_URL=https://z-biz-game.github.io/z-biz-game-hidato-cos/ bash tools/verify.sh
-#                                              # 部署件：只跑这一种形态，本脚本不起任何服务（归 2e）
+#                                              # 部署件：只跑这一种形态，本脚本不起任何服务（发布后手跑，不进 CI，见 docs/DESIGN.md）
 #   SABOTAGE=1 LEGS="crossengine" SHAPES=root bash tools/verify.sh
 #                                              # 闸的阴性自证：把 node 侧期望指纹改错一位，必须红**且 rc≠0**
 #   SABOTAGE=1 LEGS="keyboard" SHAPES=root bash tools/verify.sh
@@ -38,8 +38,8 @@
 # 的 index.html，而"页面加载成功了"分不清这件事，所以预检按字节比对磁盘上的模块。
 #
 # 每一条 URL 形态都用**自己新 mktemp 出来的 Chrome profile**：profile 里带着上一个形态的
-# localStorage 与 Service Worker 缓存，跨形态复用会把"首屏/续档"的读数变成别人的历史。
-# 也不用 `mktemp -d -t <前缀>`：macOS 的 -t 把模板当成**前缀**并往后追加时间戳，两条腿拿到的是
+# localStorage 与磁盘缓存，跨形态复用会把"首屏/续档"的读数变成别人的历史。
+# 也不用 `mktemp -d -t <前缀>`：macOS 的 -t 把模板当成**前缀**并往后追加时间戳，两个形态拿到的是
 # 不同的目录名却同样的语义，Linux 上 -t 干脆不是那个意思 —— 直接把模板写全。
 #
 # Do NOT add --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader: software
@@ -117,7 +117,7 @@ if [ "$CUSTOM" = 0 ]; then
   WEB=$(first_free "$WEB_WANT") || { echo "no free http port near $WEB_WANT" >&2; exit 2; }
   PREF=$(first_free "$PREF_WANT") || { echo "no free http port near $PREF_WANT" >&2; exit 2; }
   echo "ports: CDP $CDP (want $CDP_WANT) · root web $WEB (want $WEB_WANT) · prefix web $PREF (want $PREF_WANT)"
-  echo "  两种形态各用一个 HTTP 端口：origin 不同 ⇒ localStorage 各一套；CDP 一条腿一个新 profile 一次重启"
+  echo "  两种形态各用一个 HTTP 端口：origin 不同 ⇒ localStorage 各一套；Chrome/profile 按形态各一份，该形态的八条腿共用"
 else
   CDP=${CDP_PORT:-$CDP_WANT}
   echo "BASE_URL given → 只跑部署件这一种形态，本脚本不起任何服务（CDP $CDP）"
@@ -197,8 +197,8 @@ preflight() {
 
 start_chrome() {                  # 每一条**形态**一个新 profile、一个新 Chrome（tag 就是形态名）
   # 为什么按形态而不是按腿：这一形态的 localStorage 不许是上一形态写的，而 Chrome 起停是这条闸
-  # 最贵的一段（每条腿一次起停 ≈ 多烧 8 次 node/CDP 起停）。代价是同形态六条腿共用一份档，于是
-  # "谁写的档谁收尾"成了纪律：pointer/keyboard/resume 都往档里写，keyboard/resume 每条腿自己
+  # 最贵的一段（每条腿一次起停 ≈ 多烧 8 次 Chrome 起停）。代价是同形态八条腿共用一份档，于是
+  # "谁写的档谁收尾"成了纪律：keyboard / resume / narrow / canary 每条腿在腿内自己
   # 先 gate.wipeSave()；boot-default 那条"新 profile 上无档可续"靠的是下面 run_shape 里那句
   # 「先把 tab 停在 404 上、应用页一次都没跑过」+ 它排在清单最前。把清单换个顺序真跑过
   # （LEGS="resume boot-default"）：boot-default 会红一片并 rc=1，是响的，不是假绿。
@@ -408,8 +408,8 @@ trap cleanup EXIT
 # inside a pipeline it would hold the write end open long after the tests finished.
 # WD= inside the subshell: cleanup kills the watchdog, and a watchdog that kills itself would
 # abort its own TERM handler halfway and leave Chrome/servers behind.
-# 900s 是四条腿那一版的预算。本回合六条腿 × 两形态：键盘腿一条要 4 个回合（42 次真派发）、
-# 续局腿要两次整页启动 + 一次 Page.reload + 6x6 现生成两遍 ⇒ 每形态多烧 8 次 node/CDP 起停。
+# 900s 是四条腿那一版的预算。清单现在是八条腿 × 两形态：键盘腿一条要 4 个回合（keysTotal 42 次真派发）、
+# 续局腿要两次整页启动 + 一次 Page.reload + 6x6 现生成两遍 ⇒ 每形态 8 次 playtest 起停（Chrome 只有形态那一次）。
 # 按 900s 跑会在尾巴上被判"到点"，那是**看门狗替闸作了决定**，不是断言红 —— 所以把默认提到 1800。
 ( sleep ${WD_TIMEOUT:-1800}; echo "watchdog 到点：闸还没跑完" >&2; WD=; cleanup; exit 4 ) </dev/null >/dev/null 2>&1 &
 WD=$!
