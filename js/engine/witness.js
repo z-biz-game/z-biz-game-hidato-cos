@@ -107,6 +107,13 @@ export function countWitnessB(G, givenCell, opts = {}) {
     if (used[c]) return { outcome: 'none', reason: 'dup-given', count: 0, nodes: 0, ms: 0, stopped: false, solutions: [] };
     cellOf[v] = c; used[c] = 1;
   }
+  // 相邻两印（v 与 v+1 都印了）之间必须是王步相邻。这一段不是剪枝，是题面本身：
+  // gap 枚举只在"贴着锚点的那一步"上查邻接，而两个都印着的连续数字之间没有 gap，
+  // 于是过去会把 givenConflict 判为 given-adjacency 的盘数成 multiple/unique —— 一张假证书。
+  // 证人：rules.js verifyNumbering 对同一条边报 adjacency-fail@v；裁判对同一题面报 none/given-adjacency。
+  for (let v = 1; v + 1 <= n; v++) if (cellOf[v] >= 0 && cellOf[v + 1] >= 0 && DIST[cellOf[v] * n + cellOf[v + 1]] !== 1) {
+    return { outcome: 'none', reason: 'given-adjacency', count: 0, nodes: 0, ms: 0, stopped: false, solutions: [] };
+  }
   const gaps = [];
   {
     let v = 1;
