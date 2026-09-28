@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: syntax + engine guarantees
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 不装依赖：零运行时依赖、无构建。把包图拉进 CI 来证明一件事都证明不了，
+      # 换来的是"网络抖一下 main 就红"。
+      # 本仓的浏览器闸代码也在 tools/ 里，而且两种模块形状并存：
+      # tools/scenarios.js 是 ES module（package.json type=module 让 node --check 按 ESM 解析它），
+      # tools/playtest.cjs 是 CJS。两条通配都要写上，漏一条就是那条文件从此没人检语法。
+      - name: Syntax check every source
+        run: |
+          for f in $(git ls-files 'js/*.js' 'js/*/*.js'); do node --check "$f" || exit 1; done
+          for f in $(git ls-files 'tools/*.mjs' 'tools/*.cjs' 'tools/*.js'); do node --check "$f" || exit 1; done
+          node --check server.cjs
+
+      # 分层不变量：js/ 要发给浏览器，tools/ 不发。运行时模块 import tools/ 要么是线上 404，
+      # 要么是拿 bench 代码当产品代码 —— 那下面任何一道闸都不再是"出货的那份代码"。
+      # 正则是 import/export 形状，**不是**"提一句 tools/ 就算命中"：本仓引擎注释里合法地写着
+      # tools/balance.mjs、tools/port-check.mjs（js/engine/rules.js、js/engine/generate.js 各若干处），
+      # 宽正则会把注释判成分层破坏 —— 兄弟仓第一次 CI 红就是栽在那种"只存在于 workflow"的门上。
+      - name: js/ never imports tools/
+        run: |
+          if grep -rnE "(import|export)[^;]*from '[^']*tools/" js/ ; then
+            echo '::error::运行时模块（js/）去够了 tools/ —— 分层又倒了'
+            exit 1
+          fi
+
+      # 入口接线证据。**本仓首页没有 canvas**（`grep -c canvas index.html` 实测 0）：
+      # 盘是 DOM 格（#board [data-cell] + 数字面板），所以兄弟仓那条 `grep -q '<canvas' index.html`
+      # 在这里必然红，抄过来只是给 CI 加一条与游戏无关的死步骤。
+      # 下面每一条都在本机原样跑过（rc=0），且都指向本仓真实的接线：页面 → main.js → ui/game.js →
+      # engine/{generate,pencil,counter}，存档走 store.js。
+      - name: Entry file really wires the engine
+        run: |
+          grep -q 'id="board"' index.html
+          grep -q 'role="grid"' index.html
+          grep -q 'js/main.js' index.html
+          grep -q './engine/generate.js' js/main.js
+          grep -q './ui/game.js' js/main.js
+          grep -q './store.js' js/main.js
+          grep -q 'boardIsProven' js/main.js
+          grep -q 'generate' js/ui/game.js
+          grep -q 'countSolutions' js/ui/game.js
+          grep -q 'pencilSolve' js/ui/game.js
+          grep -q 'BASIC_RULES' js/ui/game.js
+
+      # **没有** `node --test test/`：本仓 `git ls-files test/` 为空（工作树里那个 test/ 目录没进 git，
+      # 本机实测）。这条门在这里要么必然红、要么必然空转，两种都不算证据；本仓的单元测试形状就是
+      # 下面那三道 node 闸本身。
+      - name: Rule gate (vocabulary + legal-board definition)
+        run: node tools/rule-test.mjs
+
+      - name: Pencil gate (every deduction audited against ground truth)
+        run: node tools/pencil-test.mjs
+
+      # 难度实测台：TIERS[].band / budgetMs / nodeCap 是**这张表**量出来回填进 js/engine/generate.js
+      # 的选择目标，不是标签 —— 红线 I 就是拿来核对这张表的（band/ladder 必须包住当次样本）。
+      # 24 只是 CI 的抽样量；**回填 band/budgetMs 要用 `SAMPLES=60 node tools/balance.mjs`**
+      # （分位表在小样本上不稳，拿 24 的读数去改表会把表定歪）。
+      # 一档不再落在自己的 band 里、出货盘 BASIC 推不完、唯一性证明被预算掐断、
+      # ms 闸参与了判定（G2）、见证与裁判分歧 —— 都红。
+      - name: Balance gate (measured ladder, uniqueness, cost)
+        env:
+          SAMPLES: "24"
+        run: node tools/balance.mjs
+
+      # 这里**不跑** tools/port-check.mjs：它的参照物是选型屏的输出 `_tmp-hidato-boards.tsv`，
+      # 按设计放在仓外（tools/../../_tmp-hidato-boards.tsv）。本机把仓库复制到没有参照物的相对位置
+      # 复跑过：它打印"port-check 跳过：参照物 …不在"并 **exit 3**。
+      # 把它接成硬步骤 = 一条只存在于 CI 且永远红的门；用 if 包住它 = 一条永远空转的门。
+      # 两个都不干。它是本地一次性端口对账，跑法写在 README。
+
+  # 第五道闸：真 headless Chrome、真 DOM、真 localStorage、真指针、真焦点。
+  # tools/verify.sh 自己跑两种 URL 形态（仓库=文档根的 root 形态，和 Pages 的 `/<repo>/` 前缀形态），
+  # 八条腿（boot-default boot-url crossengine pointer keyboard resume narrow canary）。
+  # Chrome 起停按**形态**而不是按腿：一个形态一个新 Chrome + 新 mktemp profile，该形态的八条腿共用它
+  # （共用一份档 ⇒ 写档的腿自己 wipe，见脚本里 start_chrome 的注释）。
+  # 第三种形态（BASE_URL=https://z-biz-game.github.io/z-biz-game-hidato-cos/）不接进 CI：
+  # Pages 落地有传播延迟，接进来只会得到一条"有时红"的门，而那条红与代码无关。
+  browser:
+    name: real browser gate (both URL shapes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        # 22，**不是**上面 check job 用的 20：tools/playtest.cjs 是裸 CDP 驱动，用 node 的全局
+        # WebSocket/fetch 打 /json/version 拿 webSocketDebuggerUrl，那两个全局只在 node ≥22 存在。
+        # 20 上第一条 attach 就抛 "WebSocket is not defined"，整个 job 在任何一条关于游戏的断言
+        # 之前就红了 —— 那种红和这个品类没有任何关系。
+        # check job 留在 20 是因为它只跑 node --check 与四道纯 node 闸，那部分不碰 CDP。
+        with:
+          node-version: 22
+      # ubuntu-latest 镜像自带 google-chrome 且在 PATH 上，正是 verify.sh 找 Chrome 的候选名之一；
+      # python3 同样自带（结果解析 + 前缀形态的静态服务器要用）。**不 apt 装任何东西**：
+      # pinned 镜像上的 apt/dpkg 是一次网络抖动的来源，它一死，读数就会被读成"游戏坏了"。
+      #
+      # 不要加 --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader：
+      # 这个闸有一半的断言在把画布/像素与 DOM 读数拿回来对账，软件光栅化会让这些读数说谎。
+      - name: Browser gate (root + prefix)
+        env:
+          # 与 tools/verify.sh 自己的默认值一致（`WD_TIMEOUT:-1800`，本机实测该行）。
+          # 看门狗不是闸打分的预算：把它调大不会让一条红的闸变绿，只能让看门狗别替闸作决定。
+          WD_TIMEOUT: 1800
+        run: bash tools/verify.sh
