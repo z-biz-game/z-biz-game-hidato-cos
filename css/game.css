@@ -139,11 +139,75 @@ pre {
 
 .save-note { color: var(--ink-soft); font-size: 12px; }
 
+/* ── 对局 HUD ─────────────────────────────────────────────────────────────── */
+.hud {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  padding: 8px 12px; margin-bottom: 12px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  font-size: 14px;
+}
+.hud[hidden] { display: none; }
+.hud button {
+  font: inherit; min-height: 44px; padding: 6px 14px; cursor: pointer;   /* 44px 指尖底线：这排是动作键，不是标签 */
+  border: 1px solid var(--line-bold); border-radius: 4px;
+  background: var(--paper); color: var(--ink);
+}
+.hud button:hover { border-color: var(--accent); color: var(--accent); }
+.hud button[aria-pressed="true"] {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.hud-note {
+  color: var(--ink-soft); font-size: 13px; margin-left: auto;
+  overflow-wrap: anywhere;                     /* 窄屏不横向溢出（窄屏腿量 body.scrollWidth） */
+}
+.hud-note.busy { color: var(--accent); }
+
+/* 暂停：只压暗与脱焦，**不改布局** —— 盘面如果 display:none，窄屏腿量的格子数与命中盒
+   就不是同一张盘了。输入在 js/main.js 里被拦（暂停态点格子 sel/手数都不动）。 */
+body.paused .board { opacity: .38; }
+body.paused .palette { opacity: .38; }
+.board, .palette { transition: opacity .18s ease; }
+
+/* ── 玩法说明 ─────────────────────────────────────────────────────────────── */
+.help { display: block; margin-bottom: 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.help[hidden] { display: none; }               /* 自带 display 就得自己补 [hidden]，见文件头 ①  */
+.help ol { margin: 0; padding-left: 1.4em; }
+.help li { margin: 4px 0; }
+
+/* ── 特效覆盖层 ───────────────────────────────────────────────────────────── */
+.fx-overlay {
+  position: fixed; top: 0; left: 0; z-index: 5;
+  pointer-events: none;                        /* 命中盒必须留给格子与面板钮 */
+}
+.fx-overlay[hidden] { display: none; }
+/* 提示格的脉冲：CSS 侧的动效，下面那条 reduce 分支要真的把它关掉。 */
+@keyframes hint-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 3px var(--hint); }
+  50% { box-shadow: inset 0 0 0 5px rgba(138, 90, 43, .34); }
+}
+.cell[data-hint="1"] { animation: hint-pulse 1.4s ease-in-out infinite; }
+
+/* reduceMotion 的 **CSS 分支**：canvas 那一侧由 js/render/fx.js 的 matchMedia 真分支处理
+   （粒子不生成、流动为 0），这里负责页面自带的动效。空的 @media 块不算做了。 */
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001s !important; animation-iteration-count: 1 !important; }
+  .cell[data-hint="1"] { animation: none; }
+  .board, .palette { transition: none; }
+  body.paused .board, body.paused .palette { opacity: .55; }
+}
+
 @media (max-width: 520px) {
-  body { padding: 12px 8px 32px; }
+  /* 这一行以前写成 `padding: 12px 8px 32px`，把 :root 那四个 env() 直接抹掉：
+     越是带刘海的窄屏设备（iPhone 竖屏）越是不避让 ⇒ 必须把 safe-area 加回来。 */
+  body {
+    padding: calc(12px + var(--safe-t)) calc(8px + var(--safe-r)) calc(32px + var(--safe-b)) calc(8px + var(--safe-l));
+  }
   h1 { font-size: 20px; }
   .controls { padding: 8px; gap: 6px 8px; }
+  .hud { padding: 8px; gap: 6px 8px; }
+  .hud-note { margin-left: 0; flex-basis: 100%; }
   .controls button { padding: 6px 10px; min-height: 44px; }   /* 窄屏下动作键也不低于 44px 的指尖目标 */
+  .hud button { padding: 6px 10px; }
   :root { --cell: clamp(34px, 11.2vw, 46px); --gap: 3px; }
   .board-wrap { gap: 10px; }
 }

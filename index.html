@@ -64,6 +64,18 @@
       <span id="status" class="status"></span>
     </section>
 
+    <!-- 对局 HUD：暂停 / 重新开始 / 静音 / 全屏 / 玩法说明。
+         这五个钮都是 js/main.js 里真绑的**动作键**（aria-pressed 反映真状态），不是装饰；
+         窄屏下与 .controls 的按钮同一条 44px 底线。 -->
+    <section class="hud" id="hud" aria-label="对局控制">
+      <button id="btn-pause" type="button" aria-pressed="false">暂停</button>
+      <button id="btn-restart" type="button">重新开始</button>
+      <button id="btn-mute" type="button" aria-pressed="false">静音</button>
+      <button id="btn-full" type="button" aria-pressed="false">全屏</button>
+      <button id="btn-help" type="button" aria-pressed="false">玩法说明</button>
+      <span id="hud-note" class="hud-note"></span>
+    </section>
+
     <section class="board-wrap" id="board-wrap">
       <div class="board" id="board" role="grid" tabindex="0"
            aria-label="数字链棋盘：点一格选中它，再点右侧的数字把它写进去"></div>
@@ -76,6 +88,22 @@
         <p id="hint" class="hint" role="status"></p>
         <p id="verdict" class="verdict" hidden></p>
       </div>
+    </section>
+
+    <section class="help" id="help" hidden>
+      <h2>玩法说明 <small>按 H 收起</small></h2>
+      <ol>
+        <li>盘上印着一些数字（含端点 <b>1</b> 与 <b>n</b>），其余格子空着。</li>
+        <li>把 <b>1..n</b> 全部写进格子：相邻两个数必须<b>王步相邻</b> —— 横、竖、斜八个方向都算一步。</li>
+        <li>每个数只能用一次；印着的数字不能改、不能清。</li>
+        <li>指针：点一格选中它，再点右侧面板里的数字写进去（触屏走 <code>pointerdown</code>，不等 300ms 的 click）。</li>
+        <li>键盘：<kbd>←↑→↓</kbd> 移选中格 · <kbd>+</kbd>/<kbd>-</kbd> 加减数字 · <kbd>⌫</kbd> 清空 ·
+          <kbd>P</kbd> 暂停 · <kbd>R</kbd> 重新开始 · <kbd>M</kbd> 静音 · <kbd>F</kbd> 全屏 · <kbd>H</kbd> 本说明 ·
+          <kbd>Enter</kbd>/<kbd>空格</kbd> 在暂停时继续（焦点在按钮上时归按钮自己）。</li>
+        <li>写满了按「判定」：页面把你写的编号交给引擎的 <code>verifyNumbering</code>，判分不靠页面自己画对勾。
+          每一盘都由 seed 现算，并由裁判穷举证明过唯一解。</li>
+      </ol>
+      <p class="kbd">提示只念铅笔规则删剩的候选，不会直接给你答案；「清空」只清你写的数，题面不动。</p>
     </section>
 
     <section class="side">
@@ -93,6 +121,10 @@
       <p id="save-note" class="save-note"></p>
     </footer>
   </main>
+
+  <!-- 特效覆盖层：只画"链在流动 / 落子溅火星 / 选中格呼吸"，不参与任何判定，也不接指针
+       （css 里 pointer-events:none —— 否则闸的 elementFromPoint 命中的是画布不是格子）。 -->
+  <canvas id="fx" class="fx-overlay" aria-hidden="true"></canvas>
 
   <script type="module" src="js/main.js"></script>
 </body>

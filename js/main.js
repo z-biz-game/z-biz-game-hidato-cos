@@ -18,6 +18,8 @@
 
 import { TIERS, tierOf } from './engine/generate.js';
 import { BoardView, measure } from './render/board.js';
+import { FxLayer } from './render/fx.js';
+import { Sfx } from './audio.js';
 import { Game, assessBoard, boardIsProven, makeBoard } from './ui/game.js';
 import { SAVE_KEY, clear as clearSave, decodeEntries, encodeEntries, load, save } from './store.js';
 
@@ -25,6 +27,9 @@ const $ = (id) => document.getElementById(id);
 const dom = {
   tier: $('tier'), seed: $('seed'), next: $('btn-next'), hint: $('btn-hint'),
   undo: $('btn-undo'), clear: $('btn-clear'), judge: $('btn-judge'),
+  pause: $('btn-pause'), restart: $('btn-restart'), mute: $('btn-mute'),
+  full: $('btn-full'), help: $('btn-help'), hudNote: $('hud-note'), helpPanel: $('help'),
+  fx: $('fx'),
   status: $('status'), filled: $('stat-filled'), steps: $('stat-steps'), conflict: $('stat-conflict'),
   boardWrap: $('board-wrap'), board: $('board'), palette: $('palette'), armedNote: $('armed-note'),
   hintLine: $('hint'), verdict: $('verdict'), receipt: $('receipt'),
@@ -34,6 +39,11 @@ const dom = {
 const app = {
   game: null, proof: null, view: new BoardView(dom.board, dom.palette),
   proven: false, saveOk: true, rejected: null, lastHint: null, judgeOut: null,
+  fx: null, sfx: new Sfx(), paused: false, helpOpen: false, fullscreen: false,
+  unlocked: false,            // AudioContext 只在**第一次真手势**之后才建（autoplay 策略）
+  tapCell: -1,                // pointerdown → click 的同一次点按去重令牌（下一帧清）
+  restartLog: null,           // 重开前后的复位读数（时钟/步数/粒子/涟漪/链段/手数/已填）
+  reduceMotionQuery: null,
 };
 
 const DEFAULT_TIER = TIERS[0].key;
@@ -82,7 +92,131 @@ function paint() {
   if (!g) return;
   app.view.build(g);
   app.view.sync(g, { conflict: conflictSet(), hint: g.hintMark, armed: g.armed });
+  syncFx();
 }
+
+// ── 特效层的几何输入 ─────────────────────────────────────────────────────────
+// 覆盖层是**视口坐标**画在 position:fixed 的画布上（CSS 像素，dpr 换算在 fx.resize 里做），
+// 所以每次重画、滚动、缩放之后都要重新快照一次；仿真本身不读 DOM（布局抖动会污染对拍读数）。
+function centerOf(cell) {
+  const r = app.view.cellRect(cell);
+  return r ? { x: r.x + r.w / 2, y: r.y + r.h / 2, r: Math.max(6, Math.min(r.w, r.h) / 2) } : null;
+}
+/** 已写出的相邻数对 = 链段；两端都落子且**王步相邻**才算"成链"（strong），否则是断口。 */
+function chainLinks(g) {
+  const out = [];
+  for (let v = 1; v < g.n; v++) {
+    const a = g.cellHolding(v);
+    const b = g.cellHolding(v + 1);
+    if (a < 0 || b < 0) continue;
+    const ca = centerOf(a);
+    const cb = centerOf(b);
+    if (!ca || !cb) continue;
+    const adjacent = Math.max(Math.abs(g.rowOf(a) - g.rowOf(b)), Math.abs(g.colOf(a) - g.colOf(b))) === 1;
+    out.push({ x0: ca.x, y0: ca.y, x1: cb.x, y1: cb.y, strong: adjacent });
+  }
+  return out;
+}
+function syncFx() {
+  const fx = app.fx;
+  if (!fx) return;
+  if (!app.game || dom.boardWrap.hidden) { fx.setLinks([]); fx.setGlow(null); return; }
+  fx.setLinks(chainLinks(app.game));
+  fx.setGlow(centerOf(app.game.sel));
+}
+
+// ── HUD 动作（每个都真改状态，读数交给 app.restartLog / fx.stats / sfx.stats）────
+function renderHud() {
+  if (!dom.hudNote) return;
+  const bits = [];
+  if (app.paused) bits.push('已暂停 · 按 P 或点「暂停」继续');
+  if (dom.mute) dom.mute.setAttribute('aria-pressed', app.sfx.muted ? 'true' : 'false');
+  if (dom.pause) dom.pause.setAttribute('aria-pressed', app.paused ? 'true' : 'false');
+  if (dom.help) dom.help.setAttribute('aria-pressed', app.helpOpen ? 'true' : 'false');
+  if (dom.full) dom.full.setAttribute('aria-pressed', app.fullscreen ? 'true' : 'false');
+  const st = app.sfx.stats();
+  if (st.contextOpen) bits.push(`音效 ${st.voices} 个音${app.sfx.muted ? '（静音中·挂起）' : ''}`);
+  dom.hudNote.textContent = bits.join(' · ');
+  dom.hudNote.classList.toggle('busy', app.paused);
+}
+
+function setPaused(on) {
+  app.paused = !!on;
+  if (app.fx) app.fx.setFrozen(app.paused);
+  document.body.classList.toggle('paused', app.paused);
+  if (window.hidato && window.hidato.hud) window.hidato.hud.phase = app.paused ? 'paused' : 'playing';
+  renderHud();
+  return app.paused;
+}
+function togglePause() { return setPaused(!app.paused); }
+
+/** 重开 = 同一张盘回到起点：时钟/粒子/链段/涟漪/临时增益/盘面读数一律归零，并把前后读数留下。 */
+function restart() {
+  const g = app.game;
+  if (!g) return null;
+  const before = { ...app.fx.stats(), steps: g.steps, filled: g.filled(), sfxVoices: app.sfx.voices };
+  setPaused(false);
+  app.fx.reset();
+  app.sfx.reset();
+  app.fx.setLinks([]);
+  app.fx.setGlow(null);
+  const opened = openBoard(g.tierKey, g.seed, null);     // restore=null ⇒ 不读存档，从空盘开始
+  const after = { ...app.fx.stats(), steps: app.game ? app.game.steps : 0, filled: app.game ? app.game.filled() : 0, sfxVoices: app.sfx.voices };
+  app.restartLog = { before, after, seed: g.seed, ok: !!opened.ok };
+  app.sfx.play('lift');
+  renderHud();
+  return app.restartLog;
+}
+
+/** 静音：真挂起上下文；静音期间 play() 一个节点都不建（见 js/audio.js 的 blocked 计数）。 */
+function toggleMute() {
+  const st = app.sfx.toggleMute();
+  renderHud();
+  return st;
+}
+
+function toggleHelp() {
+  app.helpOpen = !app.helpOpen;
+  dom.helpPanel.hidden = !app.helpOpen;
+  renderHud();
+  return app.helpOpen;
+}
+
+/** 全屏绑在**真按钮** #btn-full 上；环境不给（沙箱、非安全上下文）就记下原因，不假装成功。 */
+function toggleFullscreen() {
+  const el = document.documentElement;
+  const active = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  try {
+    if (active) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (typeof exit !== 'function') throw new Error('unsupported');
+      app.swallowDom(exit.call(document));
+      app.fullscreen = false;
+    } else {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (typeof req !== 'function') throw new Error('unsupported');
+      app.swallowDom(req.call(el));
+      app.fullscreen = true;
+    }
+  } catch (e) {
+    app.fullscreenError = String(e && e.message || e);
+  }
+  renderHud();
+  return { on: app.fullscreen, error: app.fullscreenError || '' };
+}
+// requestFullscreen/exitFullscreen 返回 promise，被拦（非手势、iOS 不支持）会拒；
+// 拒了不许冒成 unhandled rejection ⇒ 页面 console 干净也是出货的一部分。
+app.swallowDom = (p) => { if (p && typeof p.catch === 'function') p.catch((e) => { app.fullscreenError = String(e && e.message || e); }); return p; };
+
+/** 第一次真手势：建上下文（之前一个 AudioContext 都不建，autoplay 策略下那是白挨一条 warning）。 */
+function unlockAudio() {
+  if (app.unlocked) return true;
+  app.unlocked = true;
+  const ctx = app.sfx.arm();
+  renderHud();
+  return !!ctx;
+}
+
 
 // ── 读数与文案 ───────────────────────────────────────────────────────────────
 function renderReadouts() {
@@ -123,6 +257,11 @@ function renderReceipt() {
     `提示            ${g.hints} 次 · BASIC 给不出 ${g.hintStalls} 次${g.hintStalls ? '（出货盘不该出现，报给引擎侧）' : ''}`,
     `验收            ${app.proven ? '通过 · 可以出货' : '未通过 ⇒ 不作为题面发出去'}`,
   ];
+  const fx = app.fx ? app.fx.stats() : null;
+  const au = app.sfx.stats();
+  lines.push(
+    `手感层          ${fx ? `仿真 ${fx.clock.toFixed(3)}s / ${fx.simSteps} 步 · 粒子 ${fx.live} · 涟漪 ${fx.rings} · 链段 ${fx.links} · 流动 ${fx.flow.toFixed(2)} · 冻结 ${fx.frozen}${fx.reduced ? ' · 减少动效' : ''}` : '无画布'} ｜ 音频 上下文 ${au.contextOpen} · 音色 ${au.voices} · 静音挡下 ${au.blocked} · 未解锁拒放 ${au.deferred} · suspend ${au.suspendCalls}/resume ${au.resumeCalls}`,
+  );
   dom.receipt.textContent = lines.join('\n');
 }
 
@@ -140,11 +279,16 @@ function judgeAnswer() {
   } else if (!out.ok) {
     dom.verdict.textContent = `不成立 · 引擎理由 ${out.verdict}`;
     dom.verdict.classList.add('bad');
+    app.sfx.play('wrong');
   } else {
     dom.status.textContent = `完成 · ${g.label} · 盘号 ${g.seed} · ${g.steps} 手 · ${g.hints} 次提示`;
     dom.verdict.textContent = `1..${g.n} 是一条王步相邻的链，且每个数各占一格 —— 全部 ${g.board.clueCount} 条题面数为真。` +
       `这盘的解被裁判穷举证明过唯一（${app.proof && app.proof.outcome}），所以你写出来的就是那一盘。`;
     dom.verdict.classList.add('ok');
+    app.sfx.play('solve');
+    const c = centerOf(g.sel);
+    if (app.fx && c) app.fx.spawnBurst(c.x, c.y);
+    renderHud();
   }
   paint();
   renderReadouts();
@@ -187,6 +331,8 @@ function openBoard(tierKey, seed, restore) {
     return { ok: false, made };
   }
   hideReject();
+  // 换一局 = 上一局的临时状态一律不清到新盘上（时钟/粒子/涟漪/链段几何）。
+  if (app.fx) app.fx.reset();
   const game = new Game(made.board);
   let resumed = false;
   if (restore && restore.tier === tierKey && restore.seed === game.seed) {
@@ -245,10 +391,23 @@ function afterMove() {
 }
 
 // ── 真指针与键盘 ─────────────────────────────────────────────────────────────
-app.view.onCell = (cell) => {
+app.view.onCell = (cell, src) => {
   const g = app.game;
   if (!g) return;
+  if (app.paused) return;                 // 暂停态：点格子既不选中也不写子（sel/手数读数不动）
+  // 一次点按 = pointerdown + click 两个事件。select 本身幂等，但音与涟漪不该来两遍，
+  // 所以 pointerdown 记下令牌、下一帧清掉：click 撞上同一格的令牌就跳过。
+  // 令牌不用时间戳 ⇒ 没有前置 pointerdown 的派发（键盘、el.click()）照常走完整通道。
+  if (src !== 'pointer' && app.tapCell === cell) { app.tapCell = -1; return; }
+  if (src === 'pointer') {
+    app.tapCell = cell;
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { app.tapCell = -1; });
+  }
+  unlockAudio();
   g.select(cell);                        // 交互模型只有一种：点格 = 选中
+  app.sfx.play('tap');
+  const c = centerOf(cell);
+  if (app.fx && c) app.fx.spawnRing(c.x, c.y);
   app.lastHint = null;
   g.clearHint();
   paint();
@@ -257,23 +416,44 @@ app.view.onCell = (cell) => {
 app.view.onNumber = (v) => {
   const g = app.game;
   if (!g) return;
+  if (app.paused) return;
+  unlockAudio();
   const res = g.press(v);
   if (!res.ok) {
     app.lastHint = { text: WHY[res.why] || `这一步没写进去（${res.why}）` };
+    app.sfx.play('rub');
     paint();
     renderReadouts();
     return;
   }
+  const c = centerOf(g.sel);
+  const linkedNeighbour = (v > 1 && g.cellHolding(v - 1) >= 0) || (v < g.n && g.cellHolding(v + 1) >= 0);
+  if (app.fx && c) app.fx.spawnPlace(c.x, c.y, linkedNeighbour);
+  app.sfx.play('place');
   dom.verdict.hidden = true;
   afterMove();
   if (g.filled() === g.n) judgeAnswer();
 };
 function onKey(ev) {
-  const g = app.game;
-  if (!g) return;
   const t = ev.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
   const k = ev.key;
+  unlockAudio();                       // 键盘同样是真手势：按下第一下就该把上下文立起来
+  // HUD 快捷键：五个动作键与屏幕上那排钮一一对应（同一个函数，不是两套实现）。
+  if (k === 'p' || k === 'P') { ev.preventDefault(); setPaused(!app.paused); return; }
+  if (k === 'r' || k === 'R') { ev.preventDefault(); restart(); return; }
+  if (k === 'm' || k === 'M') { ev.preventDefault(); toggleMute(); return; }
+  if (k === 'f' || k === 'F') { ev.preventDefault(); toggleFullscreen(); return; }
+  if (k === 'h' || k === 'H') { ev.preventDefault(); toggleHelp(); return; }
+  if (k === 'Enter' || k === ' ') {
+    // 焦点在按钮上时**不许**抢：那是浏览器激活按钮的通道（Tab 到面板钮再按 Enter 落子那条腿靠它）。
+    if (t && t.tagName === 'BUTTON') return;
+    if (app.paused) { ev.preventDefault(); setPaused(false); }   // 只用来"继续"，不借用它落子
+    return;
+  }
+  const g = app.game;
+  if (!g) return;
+  if (app.paused) return;                // 暂停态：玩法键一个都不响应（与盘上点选同一条闸）
   let moved = false, handled = true;
   if (k === 'ArrowLeft') { g.move(0, -1); moved = true; }
   else if (k === 'ArrowRight') { g.move(0, 1); moved = true; }
@@ -293,7 +473,50 @@ function onKey(ev) {
 // 键盘腿只挂一处：挂在 window 上，焦点在盘上也在面板上也走得动。
 // 同一条 keydown 若同时绑在 #board 与 window 上会被处理两次（方向键一次走两格）。
 window.addEventListener('keydown', onKey);
-window.addEventListener('resize', paint);
+window.addEventListener('resize', () => { if (app.fx) app.fx.resize(); paint(); });
+window.addEventListener('scroll', syncFx, { passive: true });   // 覆盖层是 fixed 的：滚了就得重新快照
+
+// 特效层：dpr 由 fx.resize 换算（画布是 CSS 像素空间，position:fixed 不接指针）。
+// reduceMotion 走**真分支**——系统开关中途改了要立刻换档，不是只在启动时读一次。
+app.reduceMotionQuery = typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+app.fx = new FxLayer(dom.fx, { seed: 0x48494441 });
+app.fx.attach();
+if (app.reduceMotionQuery) app.fx.setReduceMotion(!!app.reduceMotionQuery.matches);
+app.fx.start();
+
+// ── HUD 动作钮（每个都是真动作，aria-pressed 由 renderHud 回写）───────────────
+dom.pause.addEventListener('click', () => { unlockAudio(); togglePause(); });
+dom.restart.addEventListener('click', () => { unlockAudio(); restart(); });
+dom.mute.addEventListener('click', () => { unlockAudio(); toggleMute(); });
+dom.full.addEventListener('click', () => { unlockAudio(); toggleFullscreen(); });
+dom.help.addEventListener('click', () => { unlockAudio(); toggleHelp(); });
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
+  document.addEventListener(ev, () => {
+    app.fullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    renderHud();
+  });
+}
+
+// ── pointerdown 通道 ─────────────────────────────────────────────────────────
+// 触屏上 click 要等 ~300ms 的判定窗口；这里用 pointerdown 立刻选中，坐标换算走
+// getBoundingClientRect（CSS 像素，与覆盖层同一套坐标，不混 device 像素）。
+// 随后的 click 会再选中同一个格 —— select 幂等，不产生第二手，读数不会翻倍。
+dom.board.addEventListener('pointerdown', (ev) => {
+  if (app.paused || !app.game) return;
+  // 先看真命中盒（elementFromPoint），拿不到就逐格比视口矩形：
+  // 均分矩形那种算法会把 gap/padding 算进格子里，边界上会命中错的一格。
+  let cell = typeof document.elementFromPoint === 'function'
+    ? app.view.cellFromPoint(ev.clientX, ev.clientY) : -1;
+  if (cell < 0) {
+    for (let c = 0; c < app.game.n; c++) {
+      const r = app.view.cellRect(c);
+      if (r && ev.clientX >= r.x && ev.clientX < r.x + r.w && ev.clientY >= r.y && ev.clientY < r.y + r.h) { cell = c; break; }
+    }
+  }
+  if (cell >= 0 && cell < app.game.n) app.view.onCell(cell);
+}, { passive: true });
+
 dom.tier.addEventListener('change', () => openBoard(dom.tier.value, dom.seed.value.trim() || DEFAULT_SEED));
 dom.seed.addEventListener('change', () => openBoard(dom.tier.value, dom.seed.value.trim() || DEFAULT_SEED));
 dom.next.addEventListener('click', () => openBoard(dom.tier.value, nextSeedString(dom.seed.value.trim())));
@@ -339,6 +562,39 @@ window.hidato = {
   game: null,
   view: app.view,
   dom,
+  fx: app.fx,
+  sfx: app.sfx,
+  // 玩法态字符串：探针的 playFlag 靠它认"进没进关卡"。只写 playing / paused 两种取值
+  //（paused 撞 MENUISH 是故意的：尺子看到暂停会自己走继续那条通道）。
+  hud: { phase: 'playing' },
+  /** 手动喂一段时间（三档对拍与阴性对照的入口；与 rAF 走同一个 pump ⇒ 同一条累加器）。 */
+  update(dt) { return app.fx ? app.fx.pump(Number(dt) || 0) : 0; },
+  stats() {
+    return {
+      fx: app.fx ? app.fx.stats() : null,
+      audio: app.sfx.stats(),
+      paused: app.paused ? 1 : 0,
+      help: app.helpOpen ? 1 : 0,
+      fullscreen: app.fullscreen ? 1 : 0,
+      gesture: app.unlocked ? 1 : 0,
+      reduced: app.fx ? app.fx.reduceMotion ? 1 : 0 : 0,
+      restart: app.restartLog,
+    };
+  },
+  pause: () => setPaused(true),
+  resume: () => setPaused(false),
+  togglePause,
+  restart,
+  toggleMute,
+  toggleHelp,
+  fullscreen: toggleFullscreen,
+  unlockAudio,
+  setReduceMotion(on) {
+    if (!app.fx) return null;
+    const v = app.fx.setReduceMotion(!!on);
+    renderHud();
+    return v;
+  },
   tiers: TIERS,
   doc: { timeOrigin: String(performance.timeOrigin), href: location.href },
   measure,
@@ -480,3 +736,4 @@ dom.seed.value = bootReq.seed;
 const boot = openBoard(bootReq.tier, bootReq.seed, saved);
 window.hidato.game = app.game;
 window.hidato.boot = { requested: bootReq, resumed: !!(boot.ok && boot.resumed), hasSaveAtBoot: !!saved };
+renderHud();
