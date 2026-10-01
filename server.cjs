@@ -22,6 +22,10 @@ const TYPES = {
   '.cjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  // manifest 的响应类型不是可选的：Chrome 拿到 application/octet-stream 会直接不认这份
+  // manifest（安装提示根本不出现），于是"可安装"这条判据在本地形态下永远测不到 —— 而 Pages
+  // 那边给的又是另一套 MIME，两边读数不同源，红也不知道是谁红。
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',

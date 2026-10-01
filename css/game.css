@@ -19,13 +19,20 @@
   --hint: rgba(138, 90, 43, .18);
   --cell: clamp(38px, 11.5vw, 58px);
   --gap: 4px;
+  /* 刘海 / _home_ 条的避让量。只有 index.html 里写了 viewport-fit=cover 才拿得到非 0 值，
+     默认那行没写 ⇒ env() 恒为 0，这一组变量就成了"看起来适配了其实没有"的死规则。 */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
 }
 * { box-sizing: border-box; }
 html, body { max-width: 100%; }
 body {
   margin: 0;
-  padding: 18px 14px 40px;
-  background: var(--paper);
+  /* 纸纹来自 assets/gen/gen_art.py：只用整数频率的正弦造噪声 ⇒ 四边严格对接，平铺看不见接缝。 */
+  padding: calc(18px + var(--safe-t)) calc(14px + var(--safe-r)) calc(40px + var(--safe-b)) calc(14px + var(--safe-l));
+  background: var(--paper) url("../assets/img/paper-256.png") repeat;
   color: var(--ink);
   font: 15px/1.6 ui-sans-serif, system-ui, "PingFang SC", "Hiragino Sans GB", sans-serif;
   overflow-x: hidden;
