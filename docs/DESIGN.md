@@ -143,6 +143,18 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
   首页有一块 `<canvas id="fx">`，但它是 `pointer-events: none` 的特效覆盖层，所以"按 `<canvas>` 找盘"
   那种断言在这里指的仍是错的东西。CI 里与它相关的三条是：`<canvas id="fx">` 存在、`pointer-events: none`
   在 css 里、`js/main.js` 真 import 了 `./render/fx.js` 与 `./audio.js`（写了没人接 = 死代码）。
+- **官方帧率探针对本仓结构性失明；那条「无法比对」不是本仓的未修项**。
+  `003_辅助能力/polish/script/cos_frame_probe.js` 用裸 `vm.runInContext(src)` 以经典脚本装载入口，
+  而本仓入口是 `<script type="module">`、12 个模块全带 `import` ⇒ 三档一并抛
+  `SyntaxError: Cannot use import statement outside a module`，打 `结论：无法比对`。尺子不属于本仓，
+  改不动，所以按同一份规范自建等步长尺复验（2026-10-03 本机读数）：同一虚拟时长 3s、走真 rAF 回路、
+  用真 DOM 事件注入 5 手 ⇒ `simSteps 180/180/180`（整数步数零容差），9 个字段 × 9 个 sim 步号检查点
+  加等时长末态共 81 个读数全部可比，其中 13 个有三档差值、最大 `spread/gap = 0.100`（定罪阈 3.6）；
+  `Math.random` 调用 0 次（特效随机全部来自 fx 自带、种子钉死 `0x48494441` 的 LCG）⇒ 关卡内三档零不一致。
+  判尺自己的阴性对照必须钉在**仍在吃帧 dt 的那一行**：把 `fx.pump` 的 `this.accum += capped` 换成
+  `1/60` ⇒ `simSteps 90/180/360`、落子数 3/5/5，当场红。而把 `fx.step` 的 `p.x += p.vx * dt` 换成常量
+  **照旧绿** —— 那是定步长换来的结构性质，不是尺子空跑；下一个人别拿后者当"检不出问题"的证据，
+  也别因为它去把已经定步长的行再改一遍。
 - **Pages 工件有一步"死引用"自检**：`_site` 里 `index.html` 的 src/href、`css/*.css` 的 `url()`、
   manifest 的 `icons[].src` 逐条解析成文件并核存在。它在拷贝清单加上 `assets/img/` 之前红过一条
   （`MISS css/game.css → ../assets/img/paper-256.png`，rc=1）—— 那正是"CI 全绿而线上缺图"的形状。
