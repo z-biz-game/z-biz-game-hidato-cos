@@ -335,12 +335,20 @@ function openBoard(tierKey, seed, restore) {
   if (app.fx) app.fx.reset();
   const game = new Game(made.board);
   let resumed = false;
-  if (restore && restore.tier === tierKey && restore.seed === game.seed) {
+  // 两段式解码的第一段在这里也要走一遍：`load()` 里那套信封校验（版本、字段类型、读数有限）
+  // 保护的是 localStorage 这条路，而 window.hidato.open(tier, seed, restore) 把**调用方给的**
+  // 对象直接递进来。少了这一段，一条 {"v":2,"steps":"7"} 的脏记录就能把 7 手写进新局。
+  // 段的**语义**合法性（越界、重复、落在题面上）仍是第二段 decodeEntries + game.decode 的事。
+  const okRestore = !!restore && restore.v === 1
+    && typeof restore.tier === 'string' && typeof restore.seed === 'string'
+    && typeof restore.entries === 'string'
+    && Number.isFinite(restore.steps) && Number.isFinite(restore.hints);
+  if (okRestore && restore.tier === tierKey && restore.seed === game.seed) {
     const vals = decodeEntries(restore.entries, game.n);
     resumed = !!vals && game.decode(vals);
     if (resumed) {
-      game.steps = Math.max(0, Number(restore.steps) || 0);
-      game.hints = Math.max(0, Number(restore.hints) || 0);
+      game.steps = Math.max(0, Math.trunc(restore.steps));
+      game.hints = Math.max(0, Math.trunc(restore.hints));
     }
   }
   app.game = game;
@@ -498,24 +506,37 @@ for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
   });
 }
 
-// ── pointerdown 通道 ─────────────────────────────────────────────────────────
+// ── pointerdown 通道（+ 无 PointerEvent 时的 touchstart/mousedown 回落）────────
 // 触屏上 click 要等 ~300ms 的判定窗口；这里用 pointerdown 立刻选中，坐标换算走
 // getBoundingClientRect（CSS 像素，与覆盖层同一套坐标，不混 device 像素）。
 // 随后的 click 会再选中同一个格 —— select 幂等，不产生第二手，读数不会翻倍。
-dom.board.addEventListener('pointerdown', (ev) => {
+// 回落腿只在**没有 PointerEvent 的环境**（老 iOS Safari、部分 webview）绑：两边都绑的话
+// 支持 PointerEvent 的浏览器一次点按会走两遍，第二遍落在同一格上是幂等的选中，但涟漪与
+// tap 音都要来两遍 —— 那是能被写成"有 touchstart 字符串"却根本没人走的假回落。
+function eventPoint(ev) {
+  const t = ev.touches && ev.touches.length ? ev.touches[0] : ev;
+  return { x: t.clientX, y: t.clientY };
+}
+function onBoardDown(ev) {
   if (app.paused || !app.game) return;
+  const { x, y } = eventPoint(ev);
   // 先看真命中盒（elementFromPoint），拿不到就逐格比视口矩形：
   // 均分矩形那种算法会把 gap/padding 算进格子里，边界上会命中错的一格。
-  let cell = typeof document.elementFromPoint === 'function'
-    ? app.view.cellFromPoint(ev.clientX, ev.clientY) : -1;
+  let cell = typeof document.elementFromPoint === 'function' ? app.view.cellFromPoint(x, y) : -1;
   if (cell < 0) {
     for (let c = 0; c < app.game.n; c++) {
       const r = app.view.cellRect(c);
-      if (r && ev.clientX >= r.x && ev.clientX < r.x + r.w && ev.clientY >= r.y && ev.clientY < r.y + r.h) { cell = c; break; }
+      if (r && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) { cell = c; break; }
     }
   }
   if (cell >= 0 && cell < app.game.n) app.view.onCell(cell);
-}, { passive: true });
+}
+dom.board.addEventListener('pointerdown', onBoardDown, { passive: true });
+const HAS_POINTER_EVENTS = typeof window.PointerEvent === 'function' || 'onpointerdown' in window;
+if (!HAS_POINTER_EVENTS) {
+  dom.board.addEventListener('touchstart', onBoardDown, { passive: true });
+  dom.board.addEventListener('mousedown', onBoardDown);
+}
 
 dom.tier.addEventListener('change', () => openBoard(dom.tier.value, dom.seed.value.trim() || DEFAULT_SEED));
 dom.seed.addEventListener('change', () => openBoard(dom.tier.value, dom.seed.value.trim() || DEFAULT_SEED));
@@ -602,7 +623,9 @@ window.hidato = {
   open(tierKey, seed, restore) {
     const r = openBoard(tierKey || DEFAULT_TIER, seed, restore);
     window.hidato.game = app.game;
-    return r.ok ? summary(r.game) : { ok: false, fail: r.made.fail, draws: r.made.draws };
+    // resumed 必须在回包里：否则"读档续上了没有"只能靠步数反推，而步数 0 既可能是空盘也可能是丢档
+    return r.ok ? { ...summary(r.game), resumed: !!r.resumed }
+      : { ok: false, resumed: false, fail: r.made.fail, draws: r.made.draws };
   },
   playSeed(seed, tierKey) { return window.hidato.open(tierKey, String(seed)); },
   state() {
