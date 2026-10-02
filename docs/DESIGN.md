@@ -139,8 +139,13 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
 - **CI 独有门：无。** `.github/workflows/ci.yml` 里每一条 grep 与每一道闸都在本机原样跑过（命令逐条列在
   README「怎么跑」一节，读数在「这一仓敢声称什么」与「CI 与 Pages」两节）。分层不变量那条用的是 import/export 形状的正则，不是"提一句 `tools/` 就算命中"——
   引擎注释里合法地写着 `tools/balance.mjs`、`tools/port-check.mjs`，宽正则会把注释判成分层破坏。
-- **入口接线证据不含 canvas**：本仓首页是 DOM 格（`#board` + `role="grid"` + `[data-cell]`），
-  `grep -c canvas index.html` 实测 0。任何按画布找的断言在这里都不成立。
+- **盘面按 DOM 接线来核，不按画布**：题面与命中是 `#board` + `role="grid"` + `[data-cell]`。
+  首页有一块 `<canvas id="fx">`，但它是 `pointer-events: none` 的特效覆盖层，所以"按 `<canvas>` 找盘"
+  那种断言在这里指的仍是错的东西。CI 里与它相关的三条是：`<canvas id="fx">` 存在、`pointer-events: none`
+  在 css 里、`js/main.js` 真 import 了 `./render/fx.js` 与 `./audio.js`（写了没人接 = 死代码）。
+- **Pages 工件有一步"死引用"自检**：`_site` 里 `index.html` 的 src/href、`css/*.css` 的 `url()`、
+  manifest 的 `icons[].src` 逐条解析成文件并核存在。它在拷贝清单加上 `assets/img/` 之前红过一条
+  （`MISS css/game.css → ../assets/img/paper-256.png`，rc=1）—— 那正是"CI 全绿而线上缺图"的形状。
 - **Pages 站点在首次 deploy 之前是 404**，这是预期，不是 bug。
 - **7×7 的 ms 余量最薄**（见第 3 节那次观测）；机器负载高到一定程度时该档需要重测，不要提前放宽。
 - **本仓不做 hint 之外的辅助**：`Game.hint()` 只念铅笔删剩的候选，`hintStalls` 记 BASIC 给不出提示的次数

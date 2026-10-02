@@ -42,9 +42,9 @@ jobs:
             exit 1
           fi
 
-      # 入口接线证据。**本仓首页没有 canvas**（`grep -c canvas index.html` 实测 0）：
-      # 盘是 DOM 格（#board [data-cell] + 数字面板），所以兄弟仓那条 `grep -q '<canvas' index.html`
-      # 在这里必然红，抄过来只是给 CI 加一条与游戏无关的死步骤。
+      # 入口接线证据。**盘是 DOM 格**（#board [data-cell] + 数字面板），不是画布画的：
+      # 首页唯一的 `<canvas>` 是 `#fx` 特效覆盖层（`.fx-overlay{pointer-events:none}`，不吃命中），
+      # 所以兄弟仓那条"按 `<canvas>` 找盘"的断言在这里指的仍是错的东西 —— 按盘面接线来查。
       # 下面每一条都在本机原样跑过（rc=0），且都指向本仓真实的接线：页面 → main.js → ui/game.js →
       # engine/{generate,pencil,counter}，存档走 store.js。
       - name: Entry file really wires the engine
@@ -60,6 +60,45 @@ jobs:
           grep -q 'countSolutions' js/ui/game.js
           grep -q 'pencilSolve' js/ui/game.js
           grep -q 'BASIC_RULES' js/ui/game.js
+
+      # 手感层与可安装性的入口接线。这几条都是"页面上看不出来、但缺一件就不是那份产品"的东西：
+      # `#fx` 覆盖层必须**不吃命中**（否则指针腿点到的是画布不是格子）；reduced-motion 必须有真分支
+      # （只写一句注释 = 装饰）；特效与音效模块必须真被 main.js import（写了没人接 = 死代码）；
+      # manifest / sw.js / 图标文件必须都在 —— PWA 缺任一件，浏览器只在控制台抱怨一句，照发出去。
+      - name: Feel layer and PWA entry are wired
+        run: |
+          grep -q '<canvas id="fx"' index.html
+          grep -q 'pointer-events: none' css/game.css
+          grep -q 'prefers-reduced-motion' css/game.css
+          grep -q './render/fx.js' js/main.js
+          grep -q './audio.js' js/main.js
+          grep -q 'manifest.webmanifest' index.html
+          grep -q 'serviceWorker.register' js/sw-register.js
+          test -f manifest.webmanifest
+          test -f sw.js
+          test -f icons/icon-192.png
+          test -f icons/icon-512.png
+          test -f icons/apple-touch-icon.png
+
+      # 图标的"尺寸"不读文件名里的数字，读 PNG 的 IHDR（宽/高在文件头第 16/20 字节）：
+      # `icon-192.png` 可以是一张 0 字节、一张 16×16、或者一张改了名的 SVG —— 三种都照样提交、
+      # 照样在安装面板上糊成一团。签名 + 边长一起核，才叫"那张图真的在"。
+      - name: Icons are real PNGs at the sizes their names claim
+        run: |
+          node -e '
+            const fs = require("fs");
+            const want = [["icons/favicon-32.png",32,32],["icons/apple-touch-icon.png",180,180],["icons/icon-192.png",192,192],["icons/icon-512.png",512,512],["assets/img/og.png",1200,630]];
+            let bad = 0;
+            for (const [f, minW, minH] of want) {
+              const b = fs.readFileSync(f);
+              const sig = b.slice(0, 8).toString("hex") === "89504e470d0a1a0a";
+              const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
+              const ok = sig && w >= minW && h >= minH;
+              if (!ok) bad++;
+              console.log(`${ok ? "ok " : "BAD"} ${f} png=${sig} ${w}x${h} (需 >= ${minW}x${minH})`);
+            }
+            process.exit(bad ? 1 : 0);
+          '
 
       # **没有** `node --test test/`：本仓 `git ls-files test/` 为空（工作树里那个 test/ 目录没进 git，
       # 本机实测）。这条门在这里要么必然红、要么必然空转，两种都不算证据；本仓的单元测试形状就是

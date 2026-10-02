@@ -88,19 +88,25 @@ root 与 prefix 各「8/8 legs reported · 497 checks · 0 failed」，退出码
 
 发布件里没有 Electron：`js/`、`tools/`、`server.cjs`、`package.json` 里没有任何 Electron 代码或依赖
 （仓库里只剩 `.gitignore` 的一行 `.electron-cache/` 历史痕迹），页面是纯静态 ES module，跑起来只需要 node。
-`git ls-files` 列出的就是全部出货与闸文件；CI 的 Pages 工件只取 `index.html` + `css/` + `js/`。
+`git ls-files` 列出的就是全部出货与闸文件；CI 的 Pages 工件取页面够得到的那一份
+（`index.html` + `css/` + `js/` + `icons/` + `assets/img/` + `manifest.webmanifest` + `sw.js`），
+不取 `server.cjs`、`tools/`、`docs/`、`assets/gen/`。
 
 ## CI 与 Pages
 
 `.github/workflows/ci.yml`：`check` job（node 20，不装依赖）跑语法检查、`js/` 不 import `tools/` 的分层不变量、
-入口接线证据、`rule-test` / `pencil-test` / `balance`（`SAMPLES=24`）三道 node 闸；
+入口接线证据、手感层与 PWA 接线、图标 IHDR 尺寸核对，以及 `rule-test` / `pencil-test` / `balance`
+（`SAMPLES=24`）三道 node 闸；
 `browser` job（node 22 —— `tools/playtest.cjs` 是裸 CDP 驱动，依赖 node 全局 `WebSocket`，node 20 上第一条
 attach 就抛）跑 `bash tools/verify.sh`。
-`.github/workflows/pages.yml`：无构建 = 文件拷贝（`index.html` + `css/` + `js/`）→ `actions/configure-pages@v5`
+`.github/workflows/pages.yml`：无构建 = 文件拷贝（`index.html` + `css/` + `js/` + `icons/` + `assets/img/`
++ `manifest.webmanifest` + `sw.js`）→ 一步"工件里没有死引用"的自检 → `actions/configure-pages@v5`
 → `actions/upload-pages-artifact@v3` → `actions/deploy-pages@v4`。
 
 ## 数字卫生
 
 本页里的墙上读数与条数都是**某台机器某一次的观测值**，每条都附了复跑它的命令；
 下一个接手的人请以复跑结果为准，不要把这些数字当契约 —— 契约在闸的退出码里。
-盘不是 DOM 画布（本仓首页没有 canvas：`grep -c canvas index.html` 本机实测 0），别按 canvas 找它。
+盘面不是画布画的：题面与命中都在 DOM 格上（`#board [data-cell]` + 数字面板）。首页现在有一块
+`<canvas id="fx">`（`grep -c canvas index.html` 本机实测 1），但它是 `pointer-events: none` +
+`aria-hidden="true"` 的特效覆盖层 —— 不吃命中、不承载题面，别按画布去找盘面。
