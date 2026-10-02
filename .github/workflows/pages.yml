@@ -19,9 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # 无构建 = 文件拷贝：游戏发的是原生 ES module，站点内容就是 index.html + css/ + js/。
-      # 只有这些路径会从 index.html 里被够到。把 server.cjs、tools/（五道闸与 bench）、docs/
-      # 留在工件之外，也顺手把 node_modules 留在外面 —— `path: .` 会连它一起上传。
+      # 无构建 = 文件拷贝：游戏发的是原生 ES module，站点内容 = 页面够得到的一切。
+      # 拷贝清单在 PWA 与纹理落地后变长了：`icons/`（真 PNG 全套）、`manifest.webmanifest`、`sw.js`、
+      # `assets/img/`（纸纹 + 特效贴图，css/game.css 与 js/render/fx.js 都够得到）。
+      # 少拷一件的后果不是 CI 红，是玩家手机上"能打开但装不上 / 没底纹"——所以底下有一步自检兜着。
+      # 仍然留在工件之外：server.cjs、tools/（闸与 bench）、docs/、assets/gen/（生成脚本，不是运行时资源），
+      # 也顺手把 node_modules 留在外面 —— `path: .` 会连它一起上传。
       #
       # 版本三元组是真实存在的那一组：configure-pages@v5 / upload-pages-artifact@v3 / deploy-pages@v4。
       # 老的 (v3/v1/v2) 在 marketplace 上 404 而 run 仍然报绿 —— 那就是"部署悄悄停止部署"的形状。
@@ -29,8 +32,44 @@ jobs:
       - name: Assemble static site
         run: |
           mkdir _site
-          cp index.html _site/
-          cp -r css js _site/
+          cp index.html manifest.webmanifest sw.js _site/
+          cp -r css js icons _site/
+          mkdir -p _site/assets
+          cp -r assets/img _site/assets/
+      # 上传前把工件当"已经部署的站点"读一遍：index.html 的每个 src/href、css/game.css 的每个 url()、
+      # manifest 的每个 icons[].src，都按部署后的相对位置解析成 _site 内的路径并核文件存在。
+      # 这一条不是形式主义：拷贝清单加上 icons/ 与 assets/img/ 之前，它在同一台机器上红过 ——
+      # `MISS css/game.css → ../assets/img/paper-256.png`（rc=1），正是"CI 全绿而线上缺图"的形状。
+      - name: Deployed artifact has no dead reference
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const ROOT = "_site";
+            const refs = [];
+            const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+            for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) refs.push(["index.html", m[1]]);
+            for (const line of html.split("\n")) {
+              // 精确到收尾引号：`og:image:width` 的 content="1200" 不是引用，是尺寸。
+              if (!/="og:image"|"twitter:image"/.test(line)) continue;
+              const m = line.match(/content="([^"]+)"/);
+              if (m && !/^(https?:|data:)/.test(m[1])) refs.push(["index.html", m[1]]);
+            }
+            for (const cssFile of fs.readdirSync(path.join(ROOT, "css")).filter((f) => f.endsWith(".css"))) {
+              const t = fs.readFileSync(path.join(ROOT, "css", cssFile), "utf8");
+              for (const m of t.matchAll(/url\(["\x27]?([^"\x27)]+)["\x27]?\)/g)) refs.push(["css/" + cssFile, m[1]]);
+            }
+            const mf = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.webmanifest"), "utf8"));
+            for (const ic of mf.icons || []) refs.push(["manifest.webmanifest", ic.src]);
+            let bad = 0, checked = 0;
+            for (const [from, raw] of refs) {
+              if (/^(https?:|data:|mailto:|#|\/\/)/.test(raw)) continue;
+              const target = path.resolve(ROOT, path.dirname(from), raw.replace(/[?#].*$/, ""));
+              checked++;
+              if (!fs.existsSync(target)) { bad++; console.log("MISS " + from + " → " + raw); }
+            }
+            console.log(`本地引用 ${checked} 条，缺文件 ${bad} 条`);
+            process.exit(bad ? 1 : 0);
+          '
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
