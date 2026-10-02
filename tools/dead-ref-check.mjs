@@ -39,6 +39,25 @@ function collectRefs(root) {
     const t = fs.readFileSync(path.join(root, 'css', f), 'utf8');
     for (const m of t.matchAll(/url\(["']?([^"')]+)["']?\)/g)) refs.push(['css/' + f, m[1]]);
   }
+  // js 里以**字符串字面量**取的资产（fx 层 new Image().src = 'assets/img/sparks-256.png'）。
+  // 这一条不查就有一整类"全绿而线上没特效"：图取不到只走 onerror 分支（改用圆点画），
+  // 页面照常出货、manifest 照常可安装、html/css 两条腿也都指得到真实文件 —— 没人会红。
+  // 注释里提到的同一路径会被抓进来，但它本来就该在盘上（那是同一张图），不去区分。
+  const jsDir = path.join(root, 'js');
+  if (fs.existsSync(jsDir)) {
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.js')) {
+          const t = fs.readFileSync(p, 'utf8');
+          const rel = path.relative(root, p).split(path.sep).join('/');
+          for (const m of t.matchAll(/["'`](\.\/)?((?:assets|icons)\/[^"'`\s)]+)["'`]/g)) refs.push([rel + '(asset)', m[2]]);
+        }
+      }
+    };
+    walk(jsDir);
+  }
   const mfPath = path.join(root, 'manifest.webmanifest');
   if (fs.existsSync(mfPath)) {
     const mf = JSON.parse(fs.readFileSync(mfPath, 'utf8'));
@@ -65,7 +84,10 @@ function main() {
       console.log(`ABS  ${from} → ${raw}（绝对路径，在项目 Pages 子路径下会 404）`);
       continue;
     }
-    const target = path.resolve(ROOT, path.dirname(from.startsWith('index.html') ? 'index.html' : from), clean);
+    // 三种基准：css 的 url() 相对**该 css 自己**；index.html 的 src/href 与 js 里的资产字面量
+    // 都相对**页面所在目录**（后者是喂给 new URL(rel, document.baseURI) 的，baseURI 是页面不是模块）。
+    const baseDir = from.endsWith('(asset)') || from.startsWith('index.html') ? '' : path.dirname(from);
+    const target = path.resolve(ROOT, baseDir, clean);
     checked++;
     if (!fs.existsSync(target)) {
       missing++;

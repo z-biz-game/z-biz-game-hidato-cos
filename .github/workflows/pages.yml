@@ -37,39 +37,15 @@ jobs:
           mkdir -p _site/assets
           cp -r assets/img _site/assets/
       # 上传前把工件当"已经部署的站点"读一遍：index.html 的每个 src/href、css/game.css 的每个 url()、
-      # manifest 的每个 icons[].src，都按部署后的相对位置解析成 _site 内的路径并核文件存在。
-      # 这一条不是形式主义：拷贝清单加上 icons/ 与 assets/img/ 之前，它在同一台机器上红过 ——
-      # `MISS css/game.css → ../assets/img/paper-256.png`（rc=1），正是"CI 全绿而线上缺图"的形状。
+      # manifest 的每个 icons[].src，以及 **js/ 里以字符串字面量取的资产**（fx 层 new Image() 那两张贴图
+      # —— 它取不到只走 onerror 改画圆点，html/css 两条腿照样全绿），全部按部署后的相对位置解析并核存在。
+      # 这一步直接调仓内 `tools/dead-ref-check.mjs`，**不再抄一份内联正则**：内联副本与脚本在
+      # 2026-10-03 实测已经分叉（副本查 13 条、脚本查 15 条），两份逻辑各查各的 = 等着线上缺图。
+      # 两条腿各自红过的真实读数：`MISS css/game.css → ../assets/img/paper-256.png`（拷贝清单补
+      # assets/img/ 之前）、`MISS js/render/fx.js(asset) → assets/img/sparks-256.png`（把那张图集
+      # 从工件里删掉的阴性对照，15 条缺 1，rc=1）。
       - name: Deployed artifact has no dead reference
-        run: |
-          node -e '
-            const fs = require("fs"), path = require("path");
-            const ROOT = "_site";
-            const refs = [];
-            const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
-            for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) refs.push(["index.html", m[1]]);
-            for (const line of html.split("\n")) {
-              // 精确到收尾引号：`og:image:width` 的 content="1200" 不是引用，是尺寸。
-              if (!/="og:image"|"twitter:image"/.test(line)) continue;
-              const m = line.match(/content="([^"]+)"/);
-              if (m && !/^(https?:|data:)/.test(m[1])) refs.push(["index.html", m[1]]);
-            }
-            for (const cssFile of fs.readdirSync(path.join(ROOT, "css")).filter((f) => f.endsWith(".css"))) {
-              const t = fs.readFileSync(path.join(ROOT, "css", cssFile), "utf8");
-              for (const m of t.matchAll(/url\(["\x27]?([^"\x27)]+)["\x27]?\)/g)) refs.push(["css/" + cssFile, m[1]]);
-            }
-            const mf = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.webmanifest"), "utf8"));
-            for (const ic of mf.icons || []) refs.push(["manifest.webmanifest", ic.src]);
-            let bad = 0, checked = 0;
-            for (const [from, raw] of refs) {
-              if (/^(https?:|data:|mailto:|#|\/\/)/.test(raw)) continue;
-              const target = path.resolve(ROOT, path.dirname(from), raw.replace(/[?#].*$/, ""));
-              checked++;
-              if (!fs.existsSync(target)) { bad++; console.log("MISS " + from + " → " + raw); }
-            }
-            console.log(`本地引用 ${checked} 条，缺文件 ${bad} 条`);
-            process.exit(bad ? 1 : 0);
-          '
+        run: node tools/dead-ref-check.mjs _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
