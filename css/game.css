@@ -94,6 +94,10 @@ code, kbd { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .palette-wrap[hidden] { display: none; }
 .palette { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; }
 .palette[hidden] { display: none; }
+/* 数字面板是 .board 的兄弟节点，拿不到 .board 上那条 touch-action（touch-action 沿
+   祖先链取交集，不跨兄弟）。面板按钮现在走 pointerdown，所以这里必须自己补一条：
+   否则手指按在数字上被判成滚动时 pointerdown 不触发，按下去没反应。 */
+.palette { touch-action: manipulation; }
 .num {
   min-height: 44px; padding: 4px 2px; cursor: pointer;   /* 44px 是指尖目标的底线：面板是落子的地方，不比格子小 */
   font: 600 15px/1 ui-sans-serif, system-ui, sans-serif;
