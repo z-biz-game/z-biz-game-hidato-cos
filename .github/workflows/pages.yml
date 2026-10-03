@@ -23,14 +23,14 @@ jobs:
       # 只有这些路径会从 index.html 里被够到。把 server.cjs、tools/（五道闸与 bench）、docs/
       # 留在工件之外，也顺手把 node_modules 留在外面 —— `path: .` 会连它一起上传。
       #
-      # 版本三元组是真实存在的那一组：configure-pages@v5 / upload-pages-artifact@v3 / deploy-pages@v4。
-      # 老的 (v3/v1/v2) 在 marketplace 上 404 而 run 仍然报绿 —— 那就是"部署悄悄停止部署"的形状。
-      # Pages 必须先在仓库设置里开成 workflow 构建（本仓已开），否则 configure-pages@v5 直接红。
+      # 拷哪些不写在这里——写在 tools/assemble-site.sh，本地闸与 CI 调同一支脚本。
+      # 以前这里是手抄的三行 cp（index.html/css/js），于是页面后来引用的
+      # manifest.webmanifest、sw.js、icons/* 全都上不了线：线上 404，而 CI 一路绿，
+      # 因为没有任何一步加载过那份产物。服务器、台架、文档、node_modules 仍在 artifact 外面。
       - name: Assemble static site
-        run: |
-          mkdir _site
-          cp index.html _site/
-          cp -r css js _site/
+        run: bash tools/assemble-site.sh _site
+      - name: Deploy set gate (checks the very _site about to be uploaded)
+        run: node tools/deploy-set.mjs _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
