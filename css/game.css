@@ -164,3 +164,16 @@ body {
 .fixed-bottom, .bottom-bar, .hud-bottom, footer.app-footer {
   padding-bottom: calc(var(--sab) + env(safe-area-inset-bottom, 0px));
 }
+
+/* ---------- 减弱动效（prefers-reduced-motion）---------- */
+/* 本仓当前**没有**可减的装饰性动效：全部时序代码只有 button:hover / .num:hover 的颜色瞬切，没有 transition 也没有 @keyframes
+   剩下的 :hover 颜色瞬切与 focus 轮廓是状态反馈，不是动效，动了反而更难用。 */
+@media (prefers-reduced-motion: reduce) {
+  /* 当下这三条不命中任何东西；写在这里是为了将来有人加动画/过渡时自动被归零，
+     而不必再想起来补这一段。颜色、透明度、命中区、focus 轮廓一律不动。 */
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
