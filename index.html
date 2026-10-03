@@ -34,6 +34,10 @@
       <button id="btn-hint" type="button">提示</button>
       <button id="btn-undo" type="button">撤销</button>
       <button id="btn-clear" type="button">清空</button>
+      <!-- 重开同一题：跟「清空」只差提示那一路的账（hints / hintStalls），但那条是承重的，
+           理由见 js/main.js 的 restart() 注释。跟「换一局」的分工：换一局是换一道新题，
+           这颗是「这题我走错了，原地重来」。 -->
+      <button id="btn-restart" type="button" title="重开同一题（R）">重开本题</button>
       <button id="btn-judge" type="button">判定</button>
       <button type="button" id="btn-fullscreen" aria-pressed="false" title="全屏 (F)">全屏</button>
       <span class="readouts">

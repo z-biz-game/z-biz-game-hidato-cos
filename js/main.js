@@ -24,7 +24,7 @@ import { SAVE_KEY, clear as clearSave, decodeEntries, encodeEntries, load, save 
 const $ = (id) => document.getElementById(id);
 const dom = {
   tier: $('tier'), seed: $('seed'), next: $('btn-next'), hint: $('btn-hint'),
-  undo: $('btn-undo'), clear: $('btn-clear'), judge: $('btn-judge'),
+  undo: $('btn-undo'), clear: $('btn-clear'), judge: $('btn-judge'), restart: $('btn-restart'),
   status: $('status'), filled: $('stat-filled'), steps: $('stat-steps'), conflict: $('stat-conflict'),
   boardWrap: $('board-wrap'), board: $('board'), palette: $('palette'), armedNote: $('armed-note'),
   hintLine: $('hint'), verdict: $('verdict'), receipt: $('receipt'),
@@ -282,6 +282,10 @@ function onKey(ev) {
   else if (k === '+' || k === '=') g.nudge(1);
   else if (k === '-' || k === '_') g.nudge(-1);
   else if (k === 'Backspace' || k === 'Delete') g.erase();
+  // R 重开同一题。本仓原先没有任何键占着字母：方向键走格，+/- 调 armed，⌫/Del 擦格，
+  // 所以 R 是空的，不需要挪别的键。重开在**局中就能按**，不只盘填满后 ——
+  // 玩家走到一半发现这条链子走错了，当场 R 一下原地重来，不必先填满再重来。
+  else if (k === 'r' || k === 'R') { restart(); return; }
   else handled = false;
   if (!handled) return;
   ev.preventDefault();                     // 方向键不许滚页，⌫ 不许退历史
@@ -323,6 +327,32 @@ dom.clear.addEventListener('click', () => {
   renderReceipt();
   persist();
 });
+/**
+ * 重开**同一道题**：这一局的痕迹全归零，题面不动。
+ *
+ * 和「清空」的区别就一条，但那条是承重的：清空只擦盘面，提示那一路的账（hints /
+ * hintStalls）原封不动留着。提示是真的泄题 —— hint() 跑在当前玩家状态上，推出的那格
+ * 是白送的答案；而 hintStalls 是出货质量计数（这道盘上 BASIC 推不出的次数，出货盘应为 0），
+ * 带着旧账进新局，回执会拿上一局的账去报这道盘面的缺陷，那是假红。
+ * 所以重开必须走 g.resetAll()，不能拿 clearAll() 顶替。
+ *
+ * 题面级的 app.proof / app.proven 特意**不**碰：它们是这一**道题**的验收凭证，
+ * 同题重开凭证照旧成立；擦掉它等于谎称"这道盘没验过"。
+ */
+function restart() {
+  const g = app.game;
+  if (!g) return null;
+  g.resetAll();
+  app.lastHint = null;        // 上一条提示文案，属于上一局
+  app.judgeOut = null;        // 上一局点「验收」得出的结论，同理
+  dom.verdict.hidden = true;  // 判定条收起来，别把上一局的结论压在新盘上
+  paint();
+  renderReadouts();
+  renderReceipt();
+  persist();                  // 存档覆盖成本局的空盘：刷新不会又冒出走错那半局
+  return g;
+}
+dom.restart.addEventListener('click', restart);
 dom.judge.addEventListener('click', () => judgeAnswer());
 
 for (const t of TIERS) {
@@ -373,6 +403,9 @@ window.hidato = {
       hintStalls: g.hintStalls, saveKey: SAVE_KEY, saveOk: app.saveOk, proven: app.proven,
     };
   },
+  // 供探针调：重开同一题。放在这个对象上而不是只挂在按钮上，是为了让浏览器闸能
+  // 真的驱动一次重开、读 BEFORE/AFTER，而不必去合成鼠标点击。
+  restart,
   hint() {
     const g = app.game;
     if (!g) return null;
