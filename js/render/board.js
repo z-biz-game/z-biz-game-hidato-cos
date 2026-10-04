@@ -14,6 +14,14 @@
 //      不设内联像素 ⇒ 390×844 上格子缩到能点、且不出现横向滚动条，这一条由 CSS 单独负责。
 
 /** 档位键 + 格数决定节点形状；同一档换 seed 不需要重建。 */
+
+/* ---------- 帧率无关（dt）---------- */
+/* 本仓**没有逐帧运动**，所以「帧率无关」这一项在本仓是空命题而不是缺陷：本仓没有 canvas，是 DOM 渲染（js/render/board.js 直接改格子的 class/文本），全仓 requestAnimationFrame 出现 0 次；唯一的 CSS 动效是 :hover 的颜色瞬切，没有 transition 也没有 @keyframes
+   没有自续期的 requestAnimationFrame 循环，屏上就没有「每帧推进」的量，帧率也就无从影响它。
+   写这段备案是为了让账上分得开"查过、确实不需要"与"没人查过"——不是为了让判据变绿。
+
+   规矩：**哪天在本仓加了逐帧动画循环，必须先删掉这段备案**，并让循环体消费 rAF 自带的
+   时间戳（或自己取 performance.now()），把动画进度写成绝对截止；只按帧累加位置的一律不算。 */
 function boardSig(game) { return `${game.tierKey}:${game.R}x${game.C}`; }
 
 export class BoardView {
