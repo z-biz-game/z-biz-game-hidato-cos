@@ -120,7 +120,7 @@ if [ "$CUSTOM" = 0 ]; then
   echo "  两种形态各用一个 HTTP 端口：origin 不同 ⇒ localStorage 各一套；Chrome/profile 按形态各一份，该形态的八条腿共用"
 else
   CDP=${CDP_PORT:-$CDP_WANT}
-  echo "BASE_URL given → 只跑部署件这一种形态，本脚本不起任何服务（CDP $CDP）"
+  echo "BASE_URL given → 只跑部署件这一种形态，本脚本不起任何服务（CDP ${CDP}）"
 fi
 echo "logs: $LOGDIR"
 [ "$PLANT_TRUTH" = 1 ] && echo "PLANT_TRUTH=1 → boot 场景会把 node 侧真值挂到 hidato.gate.__plantedTruth 上再扫（扫不到就该红）"
@@ -179,7 +179,7 @@ preflight() {
   local base=$1 rel want got f served
   served=$(curl -fsS -m 8 "$base" 2>/dev/null) || { echo "  首页取不到：$base" >&2; return 1; }
   case "$served" in *js/main.js*) ;; *) echo "  $base 上发的不是本仓的首页（正文里找不到 js/main.js）" >&2; return 1 ;; esac
-  case "$served" in *"$FEATURE"*) ;; *) echo "  $base 在发别的应用：首页正文里找不到「$FEATURE」" >&2; return 1 ;; esac
+  case "$served" in *"$FEATURE"*) ;; *) echo "  $base 在发别的应用：首页正文里找不到「${FEATURE}」" >&2; return 1 ;; esac
   for rel in $PREFLIGHT_RELS; do
     want=$(wc -c < "$HERE/$rel" | tr -d ' ')
     [ -n "$want" ] || { echo "  $rel 在磁盘上读不到，闸没有可对的基准" >&2; return 1; }
@@ -187,11 +187,11 @@ preflight() {
     got=$(curl -sS -m 8 -o "$f" -w '%{http_code} %{size_download}' "$base$rel" 2>/dev/null) || {
       echo "  $rel 取不回来：$base$rel" >&2; return 1; }
     case "$got" in "200 $want") ;; *)
-      echo "  $rel 不对味：$base$rel 回 $got，磁盘上的这份是 200 $want 字节" >&2
+      echo "  $rel 不对味：$base$rel 回 ${got}，磁盘上的这份是 200 $want 字节" >&2
       echo "  前两行到手内容：$(head -c 160 "$f" | tr '\n' ' ')" >&2
       return 1 ;; esac
   done
-  echo "  预检：首页含「$FEATURE」与 js/main.js · $(echo $PREFLIGHT_RELS | wc -w | tr -d ' ') 条真实模块路径按字节对上磁盘"
+  echo "  预检：首页含「${FEATURE}」与 js/main.js · $(echo $PREFLIGHT_RELS | wc -w | tr -d ' ') 条真实模块路径按字节对上磁盘"
   return 0
 }
 
@@ -231,13 +231,13 @@ run_leg() {
     boot-default)
       s=boot
       nav="$base"
-      expect=$(node tools/playtest.cjs witness "$BOOT_TIER" "$BOOT_SEED") || { echo "  node 证人起不来（$BOOT_TIER/$BOOT_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs witness "$BOOT_TIER" "$BOOT_SEED") || { echo "  node 证人起不来（$BOOT_TIER/${BOOT_SEED}）" >&2; RUNBAD=1; return; }
       [ "$PLANT_TRUTH" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["plant"]=1;print(json.dumps(d))')
       ;;
     boot-url)
       s=boot
       nav="${base}?tier=${URL_TIER}&seed=${URL_SEED}"
-      expect=$(node tools/playtest.cjs witness "$URL_TIER" "$URL_SEED") || { echo "  node 证人起不来（$URL_TIER/$URL_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs witness "$URL_TIER" "$URL_SEED") || { echo "  node 证人起不来（$URL_TIER/${URL_SEED}）" >&2; RUNBAD=1; return; }
       [ "$PLANT_TRUTH" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["plant"]=1;print(json.dumps(d))')
       ;;
     crossengine)
@@ -247,7 +247,7 @@ run_leg() {
       s=pointer
       mode=interact
       nav="${base}?tier=${PLAY_TIER}&seed=${PLAY_SEED}"
-      expect=$(node tools/playtest.cjs witness "$PLAY_TIER" "$PLAY_SEED") || { echo "  node 证人起不来（$PLAY_TIER/$PLAY_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs witness "$PLAY_TIER" "$PLAY_SEED") || { echo "  node 证人起不来（$PLAY_TIER/${PLAY_SEED}）" >&2; RUNBAD=1; return; }
       ;;
     keyboard)
       # 真键盘腿：CDP Input.dispatchKeyEvent 派进来的键，页面一个 hidato.* 动词都不许调。
@@ -257,7 +257,7 @@ run_leg() {
       mode=interact
       vp=${KB_VIEWPORT:-1280x720}
       nav="${base}?tier=${PLAY_TIER}&seed=${PLAY_SEED}"
-      expect=$(node tools/playtest.cjs witness "$PLAY_TIER" "$PLAY_SEED") || { echo "  node 证人起不来（$PLAY_TIER/$PLAY_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs witness "$PLAY_TIER" "$PLAY_SEED") || { echo "  node 证人起不来（$PLAY_TIER/${PLAY_SEED}）" >&2; RUNBAD=1; return; }
       # 阴性自证：把**期望轨迹**故意打断一格（真键盘不会走两步 ⇒ 那一格必红）
       [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["kbBreak"]=1;print(json.dumps(d))')
       ;;
@@ -267,7 +267,7 @@ run_leg() {
       s=resume
       mode=interact
       nav="$base"
-      expect=$(node tools/playtest.cjs witness "$RESUME_TIER" "$RESUME_SEED") || { echo "  node 证人起不来（$RESUME_TIER/$RESUME_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs witness "$RESUME_TIER" "$RESUME_SEED") || { echo "  node 证人起不来（$RESUME_TIER/${RESUME_SEED}）" >&2; RUNBAD=1; return; }
       # 阴性自证第一把：把"新文档"这个证人**假装成同文档片段跳转**（哨兵/timeOrigin/href 三条当场红）
       [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["fakeReload"]=1;print(json.dumps(d))')
       # 阴性自证第二把：把 node 侧真值当场写进 localStorage，刷新后那两条落盘卫生扫描必须抓到
@@ -283,7 +283,7 @@ run_leg() {
       vp=$NARROW_VIEWPORT
       mob=1
       nav="${base}?tier=${NARROW_TIER}&seed=${NARROW_SEED}"
-      expect=$(node tools/playtest.cjs witness "$NARROW_TIER" "$NARROW_SEED") || { echo "  node 证人起不来（$NARROW_TIER/$NARROW_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs witness "$NARROW_TIER" "$NARROW_SEED") || { echo "  node 证人起不来（$NARROW_TIER/${NARROW_SEED}）" >&2; RUNBAD=1; return; }
       # 把"请求了什么视口"写进期望值：页内读回的 innerWidth / devicePixelRatio / clientWidth /
       # innerHeight 逐条与它对账 ⇒ 覆写没生效（读数 = Chrome 窗口那一对）当场红。
       expect=$(printf '%s' "$expect" | python3 -c '
@@ -293,7 +293,7 @@ p = sys.argv[1].split("x")
 d["vwWant"] = int(p[0]); d["vhWant"] = int(p[1])
 d["dprWant"] = int(p[2]) if len(p) > 2 else 1
 d["mobileWant"] = True
-print(json.dumps(d))' "$vp") || { echo "  窄屏腿的视口三元组拼不进 expect（$vp）" >&2; RUNBAD=1; return; }
+print(json.dumps(d))' "$vp") || { echo "  窄屏腿的视口三元组拼不进 expect（${vp}）" >&2; RUNBAD=1; return; }
       # 阴性自证：把**期望的 dpr** 换成 1（覆写实际给的是 2）⇒ 覆写证人红 + 那条"请求的不是桌面那一队"红。
       [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["dprWant"]=1;print(json.dumps(d))')
       ;;
@@ -305,7 +305,7 @@ print(json.dumps(d))' "$vp") || { echo "  窄屏腿的视口三元组拼不进 e
       # 用 msCap 造负样本会让盘形跟着机器速度变，那是本组织的红线，一条都不许碰。
       s=canary
       nav="$base"
-      expect=$(node tools/playtest.cjs canary "$CANARY_TIER" "$CANARY_SEED") || { echo "  canary 的 node 证人交不出五张负样本（$CANARY_TIER/$CANARY_SEED）" >&2; RUNBAD=1; return; }
+      expect=$(node tools/playtest.cjs canary "$CANARY_TIER" "$CANARY_SEED") || { echo "  canary 的 node 证人交不出五张负样本（$CANARY_TIER/${CANARY_SEED}）" >&2; RUNBAD=1; return; }
       # 阴性自证：拿掉 given-adjacency 那一张负样本 ⇒ 那条"分支可达"必须红（这一腿最值钱的就是让人
       # 看见拒绝分支没被走到，所以它必须能红）。
       [ "$SABOTAGE" = 1 ] && expect=$(printf '%s' "$expect" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["canaryDrop"]="adjacency";print(json.dumps(d))')
