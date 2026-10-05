@@ -452,7 +452,7 @@ function onKey(ev) {
   if (k === 'r' || k === 'R') { ev.preventDefault(); restart(); return; }
   if (k === 'm' || k === 'M') { ev.preventDefault(); toggleMute(); return; }
   if (k === 'f' || k === 'F') { ev.preventDefault(); toggleFullscreen(); return; }
-  if (k === 'h' || k === 'H') { ev.preventDefault(); toggleHelp(); return; }
+  if (k === 'h' || k === 'H' || k === '?') { ev.preventDefault(); toggleHelp(); return; }
   if (k === 'Enter' || k === ' ') {
     // 焦点在按钮上时**不许**抢：那是浏览器激活按钮的通道（Tab 到面板钮再按 Enter 落子那条腿靠它）。
     if (t && t.tagName === 'BUTTON') return;

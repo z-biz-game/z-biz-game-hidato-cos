@@ -66,7 +66,8 @@
 
     <!-- 对局 HUD：暂停 / 重新开始 / 静音 / 全屏 / 玩法说明。
          这五个钮都是 js/main.js 里真绑的**动作键**（aria-pressed 反映真状态），不是装饰；
-         窄屏下与 .controls 的按钮同一条 44px 底线。 -->
+         与 .controls 那排动作键共用同一条 min-height:44px —— 写在 base 规则里，
+         所以 521px 以上的触屏（iPad 竖屏 768/834、手机横屏）也在 44px 之上，不再只靠窄屏那条 override。 -->
     <section class="hud" id="hud" aria-label="对局控制">
       <button id="btn-pause" type="button" aria-pressed="false">暂停</button>
       <button id="btn-restart" type="button">重新开始</button>
@@ -98,7 +99,7 @@
         <li>每个数只能用一次；印着的数字不能改、不能清。</li>
         <li>指针：点一格选中它，再点右侧面板里的数字写进去（触屏走 <code>pointerdown</code>，不等 300ms 的 click）。</li>
         <li>键盘：<kbd>←↑→↓</kbd> 移选中格 · <kbd>+</kbd>/<kbd>-</kbd> 加减数字 · <kbd>⌫</kbd> 清空 ·
-          <kbd>P</kbd> 暂停 · <kbd>R</kbd> 重新开始 · <kbd>M</kbd> 静音 · <kbd>F</kbd> 全屏 · <kbd>H</kbd> 本说明 ·
+          <kbd>P</kbd> 暂停 · <kbd>R</kbd> 重新开始 · <kbd>M</kbd> 静音 · <kbd>F</kbd> 全屏 · <kbd>H</kbd>/<kbd>?</kbd> 本说明 ·
           <kbd>Enter</kbd>/<kbd>空格</kbd> 在暂停时继续（焦点在按钮上时归按钮自己）。</li>
         <li>写满了按「判定」：页面把你写的编号交给引擎的 <code>verifyNumbering</code>，判分不靠页面自己画对勾。
           每一盘都由 seed 现算，并由裁判穷举证明过唯一解。</li>
