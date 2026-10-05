@@ -529,7 +529,7 @@ function onBoardDown(ev) {
       if (r && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) { cell = c; break; }
     }
   }
-  if (cell >= 0 && cell < app.game.n) app.view.onCell(cell);
+  if (cell >= 0 && cell < app.game.n) app.view.onCell(cell, 'pointer');
 }
 dom.board.addEventListener('pointerdown', onBoardDown, { passive: true });
 const HAS_POINTER_EVENTS = typeof window.PointerEvent === 'function' || 'onpointerdown' in window;
@@ -624,7 +624,7 @@ window.hidato = {
     const r = openBoard(tierKey || DEFAULT_TIER, seed, restore);
     window.hidato.game = app.game;
     // resumed 必须在回包里：否则"读档续上了没有"只能靠步数反推，而步数 0 既可能是空盘也可能是丢档
-    return r.ok ? { ...summary(r.game), resumed: !!r.resumed }
+    return r.ok ? { ok: true, ...summary(r.game), resumed: !!r.resumed }
       : { ok: false, resumed: false, fail: r.made.fail, draws: r.made.draws };
   },
   playSeed(seed, tierKey) { return window.hidato.open(tierKey, String(seed)); },
