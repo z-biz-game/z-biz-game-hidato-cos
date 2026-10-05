@@ -28,6 +28,10 @@
   所以提示不可能"作弊"。
 - **判定**：把**你自己写的**编号交给 `js/engine/rules.js` 的 `verifyNumbering` 读回结论。
 - **撤销 / 清空**：`undo()` 逐手回退（按落子成组），`clearAll()` 清掉玩家写入的部分，题面不动。
+- **对局 HUD**：`P` 暂停 · `R` 重新开始 · `M` 静音 · `F` 全屏 · `H`/`?` 玩法说明，与屏幕上那五个钮走**同一组
+  函数**（不是两套实现）。暂停期间仿真一秒都不推进（`js/render/fx.js` 不喂累加器），恢复也不补跑暂停那段；
+  静音是 `AudioContext.suspend()`，静音中 `play()` 一个振荡器都不建（计数在 `sfx.stats().blocked`）。
+  动作键与数字面板的 `min-height:44px` 写在 base 规则里，所以 iPad 竖屏（768/834）也在指尖底线之上。
 - **存档**：`localStorage['hidato.save.v1']`，字段按 `js/store.js` 的白名单 `SAVE_FIELDS`
   （`v` / `tier` / `seed` / `entries` / `steps` / `hints`）写。**真值绝不落盘**：`entries` 里印着的格恒为 `00`，
   题面由 tier+seed 现算回来；`ANSWERISH` 那份名单给浏览器闸当"扫到就红"的单点定义。

@@ -160,6 +160,40 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
   `spread/gap = 0.068`；阴性对照复现同形状 —— 钉 `accum += capped` ⇒ `89/179/359` 红，钉 `p.x += p.vx*dt`
   ⇒ 照旧绿。那一轮还抓到并修掉两处"字符串命中行为不成立"：`onBoardDown` 没传 `src='pointer'` 使
   tapCell 去重令牌是死代码（真浏览器一次点按两遍涟漪+tap 音），与 `open()` 成功回包缺 `ok` 字段。
+  2026-10-05 第三轮独立复验（`/tmp` 自建 DOM 垫片装载真 `js/main.js`，虚拟时钟从 1000ms 起，注入钉在
+  **sim 步号**上而不是墙钟秒，走真 `pointerdown` + 面板 `click` 落 5 手）：三档都采到的步号交集 178 个 ×
+  12 字段取 22 个检查点 = **264 读数位级全等**（spread=0）；同 3.0s 末态 `simSteps 178/178/179`（极差 1 步，
+  浮点少喂在容差内）；`Math.random` 0 次。判尺校验矩阵扩到四发：`accum += capped`→`1/60` ⇒ `89/179/359` 红；
+  `capped = SIM_STEP` ⇒ 同红；`p.x += p.vx*dt`→常量 ⇒ 照旧绿（定步长的结构性质）；**新第四发**
+  `step(SIM_STEP)`→`step(capped)`（步数不动、积分吃帧 dt）⇒ 尺A 只剩 133/264 全等、尺B 包络出界 702 处 ——
+  前两发只盯累加器，这一发才证明积分器也在盯着。
+  两条**尺子自己的前提修正**（改的是判据的成立条件，不是放宽阈值）：① 驱动循环若写成"喂到 `simSteps` 达标"
+  会把 `accum` 变异整个洗绿（实测三档都停在 180、比值 0.000）——必须钉死虚拟时长再比末态；
+  ② "spread / 相邻刻度差"这个比值口径对本仓不适定：`flow` 是 `(clock*42)%26` 的锯齿、`live` 是离散计数，
+  相邻差可以趋 0 ⇒ 连 ±1 步的正常采样滞后都炸成 Infinity（baseline 当场 3 处红）。换成**采样滞后包络**：
+  某档在刻度 i 的步号为 k，其读数必须落进参照档 `[k-L, k+L]`（`L = ceil(帧长/步长)`）的 min/max 之内；
+  包络窗缺员（参照档已跑到头的末刻度，48 个读数）记"不可评"，既不判红也不判绿。修正后 baseline 两把尺全绿、
+  四发变异按上面那个形状红/绿。
+  同一轮把 §2 的行为判据在同一个垫片里量了 31 条，全绿：暂停喂 1.0s ⇒ `simSteps 29→29`、`clock` 不变、
+  `idleSkips` +帧数，恢复 30 帧 ⇒ `+29 步`（不补跑暂停那 1.0s，否则会是 +90）；静音用假 AudioContext 验真挂起
+  ⇒ `ctx.state=suspended`、静音中 5 次 `play()` ⇒ `voices 8→8`（增量 0）而 `blocked 0→5`，取消静音
+  `resumeCalls=1` 后 `voices 8→10`；重开 ⇒ `clock 1.450→0 · simSteps 87→0 · 粒子 30→0 · 涟漪 3→0 · 手数 7→0 ·
+  已填 17→10`（回到给定格数），音频临时计数清零（restart 自己那声 lift 留下 `plays=1`）；7 条坏 restore
+  （null / 缺 entries / steps 是字符串 / 版本 2 / 越界 50 / 重复值 / 半截 entries）逐条 `ok=true resumed=false`
+  且之后还能落子，5 条坏 raw 走 `load()` 第一段全部 `null`、合法 raw 读得出来。
+  ⚠ 那批 `load()` 读数**第一次跑是假的**：垫片把 Map 当 localStorage 传了进去，`getItem` 抛的异常被 `load`
+  自己的 try/catch 吞成 null ⇒ 五条坏档全"通过"、合法档也返回 null。换成真 `localStorage` 才有上面这组数。
+- **44px 命中区现在写在 base 规则，不再只写在窄屏里**（2026-10-05 修）。`.controls button` 原 `min-height:38px`、
+  `.controls select/input` 原 `34px`，只有 `@media (max-width:520px)` 那一条才抬到 44px ⇒ 521px 以上的触屏
+  （iPad 竖屏 768/834、手机横屏）拿到的是 38px，而 `index.html` 的注释当时写着"与 .controls 同一条 44px 底线"。
+  窄屏格子同一条判据也不成立：`--cell: clamp(34px, 11.2vw, 46px)` 只看视口不看列数，390px 竖屏上三档一律
+  43.68px（差 0.32px 掉在 44 下面），而同宽度下 7×7 的盘只占 341.76px、374px 的可用宽还剩 32px 没用满。
+  改成按列数分配 `min(46px, (100vw - 38px - (C-1)*gap)/C)`（`--cols` 由 `js/render/board.js` 换档时写进
+  `.board`），于是封顶不生效时盘宽恒等于 `100vw - 20`：
+  算术上 390px ⇒ 5×5/6×6/7×7 全 46px（盘宽 358 + body 16 = 374 ≤ 390）；360px 7×7 ⇒ 43.4px（再抬就顶破
+  盘宽恒等式、撞上文件头②"不许横向滚动条"那条不变量，这是**有意保留的例外**）；320px 7×7 ⇒ 37.7px，
+  盘宽 300 + 16 = 316 ≤ 320 不溢出，也仍高于窄屏腿的可读性下限 34px。
+  这三组数是算出来的，浏览器腿（`tools/scenarios.js` narrow）量到的矩形才是证人 —— 下一棒跑 GUI 时核一下。
 - **Pages 工件有一步"死引用"自检**：`_site` 里 `index.html` 的 src/href、`css/*.css` 的 `url()`、
   manifest 的 `icons[].src` 逐条解析成文件并核存在。它在拷贝清单加上 `assets/img/` 之前红过一条
   （`MISS css/game.css → ../assets/img/paper-256.png`，rc=1）—— 那正是"CI 全绿而线上缺图"的形状。
@@ -167,3 +201,12 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
 - **7×7 的 ms 余量最薄**（见第 3 节那次观测）；机器负载高到一定程度时该档需要重测，不要提前放宽。
 - **本仓不做 hint 之外的辅助**：`Game.hint()` 只念铅笔删剩的候选，`hintStalls` 记 BASIC 给不出提示的次数
   （出货盘上应为 0，浏览器闸会读它）。
+- **美术资产是"能逐字节重刷"的，不是"从网上下的"**（2026-10-05 实测）：把 `assets/ css/ js/ icons/
+  index.html manifest.webmanifest` 复制到 `/tmp` 副本里重跑 `python3 assets/gen/gen_art.py`，13 张 PNG 的
+  sha256 与盘上**逐张相同**（母题链按 `js/engine/rules.js` 的同一条王步语义算出来，色值抄自 `css/game.css`
+  的实测十六进制，随机只来自写死常数的 LCG）。`file` 逐张确认真 PNG、python 读 IHDR 确认真宽高：
+  favicon 16/32/48 · icon-96/192/512 · maskable-512 · apple-touch 180 · icon-1024 · og 1200×630 ·
+  纸纹 paper-256 · 粒子图集 sparks 256×64（4 帧）· 呼吸光 glow-128。`tools/dead-ref-check.mjs` 同轮读数
+  "本地引用 15 条，缺文件 0 条"。
+- **教学面板有两条键通道**：`H`/`h`/`?` 都走同一个 `toggleHelp()`（2026-10-05 补 `?`，简报 §2 的键盘清单
+  点名要 `H/?`）。焦点在按钮上时 `Enter`/`空格` 归按钮自己，不抢。
