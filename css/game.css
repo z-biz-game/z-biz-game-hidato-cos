@@ -59,12 +59,12 @@ code, kbd { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .controls[hidden] { display: none; }
 .controls label { display: flex; align-items: center; gap: 6px; }
 .controls select, .controls input {
-  font: inherit; padding: 4px 6px; min-height: 34px;
+  font: inherit; padding: 4px 6px; min-height: 44px;   /* 44px 底线写在 base：iPad 竖屏 768/手机横屏都 >520px，窄屏那条 override 救不到它们 */
   border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--ink);
 }
 .controls input { width: 9ch; }
 .controls button {
-  font: inherit; padding: 6px 14px; min-height: 38px; cursor: pointer;
+  font: inherit; padding: 6px 14px; min-height: 44px; cursor: pointer;   /* 同上：判定/提示/换一局/撤销/清空在任意宽度都不低于指尖目标 */
   border: 1px solid var(--accent); border-radius: 4px;
   background: #fff; color: var(--accent);
 }
@@ -206,8 +206,20 @@ body.paused .palette { opacity: .38; }
   .controls { padding: 8px; gap: 6px 8px; }
   .hud { padding: 8px; gap: 6px 8px; }
   .hud-note { margin-left: 0; flex-basis: 100%; }
-  .controls button { padding: 6px 10px; min-height: 44px; }   /* 窄屏下动作键也不低于 44px 的指尖目标 */
+  .controls button { padding: 6px 10px; }   /* min-height 44px 已经在 base 里，窄屏只收内边距 */
   .hud button { padding: 6px 10px; }
-  :root { --cell: clamp(34px, 11.2vw, 46px); --gap: 3px; }
+  /* 格子边长改为**按列数适配**：原来的 clamp(34px, 11.2vw, 46px) 只看视口不看列数，
+     于是 390px 竖屏上 5×5/6×6/7×7 全是 43.68px —— 三个档位一起卡在 44px 指尖底线下面 0.3px，
+     而同一宽度下 7×7 的盘只占 341.76px（43.68*7 + 3*6 缝 + 18 盘框），374px 的可用宽还剩 32px 没用满。
+     这里按"视口宽 - body 左右内边距(16) - 盘的 padding+border(18) - 4px 余量"给每列分配，46px 封顶，
+     于是封顶不生效时盘宽恒为 100vw-20：
+       390px：5×5 (390-38-12)/5=68→46 · 6×6 (390-38-15)/6=56.2→46 · 7×7 (390-38-18)/7=47.7→46
+              三档一律 46px，盘宽 46*7+18+18=358，加 body 的 16 是 374 ≤ 390
+       360px：7×7 (360-38-18)/7=43.4（唯一的例外：封顶救不到这一档，再抬就顶破盘宽恒等式，
+              宁可少 0.6px 也不破文件头②那条"不许横向滚动"：43.4*7+18+18+16=356 ≤ 360）
+       320px：7×7 (320-38-18)/7=37.7，盘宽 300，加 body 16 是 316 ≤ 320 不溢出，且远高于 34px 可读下限
+     --cols 由 js/render/board.js 在换档时写在 .board 上，所以这个除法用的就是当前档位。 */
+  .board { --cell: min(46px, calc((100vw - 38px - (var(--cols, 5) - 1) * var(--gap)) / var(--cols, 5))); }
+  :root { --gap: 3px; }
   .board-wrap { gap: 10px; }
 }
