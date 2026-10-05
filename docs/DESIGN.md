@@ -155,6 +155,11 @@ QA 是**闸的批量读数**，`tools/balance.mjs` 已经在闸里批量买过�
   `1/60` ⇒ `simSteps 90/180/360`、落子数 3/5/5，当场红。而把 `fx.step` 的 `p.x += p.vx * dt` 换成常量
   **照旧绿** —— 那是定步长换来的结构性质，不是尺子空跑；下一个人别拿后者当"检不出问题"的证据，
   也别因为它去把已经定步长的行再改一遍。
+  2026-10-05 独立会话复验（同法、采样口径换成"三档都精确采到的 simSteps 交集"）：48 步 × 8 字段 = 384
+  读数 spread=0（位级全等）；同 3.0s 末态 `simSteps 178/178/179`（浮点少喂一步在容差内）、最大
+  `spread/gap = 0.068`；阴性对照复现同形状 —— 钉 `accum += capped` ⇒ `89/179/359` 红，钉 `p.x += p.vx*dt`
+  ⇒ 照旧绿。那一轮还抓到并修掉两处"字符串命中行为不成立"：`onBoardDown` 没传 `src='pointer'` 使
+  tapCell 去重令牌是死代码（真浏览器一次点按两遍涟漪+tap 音），与 `open()` 成功回包缺 `ok` 字段。
 - **Pages 工件有一步"死引用"自检**：`_site` 里 `index.html` 的 src/href、`css/*.css` 的 `url()`、
   manifest 的 `icons[].src` 逐条解析成文件并核存在。它在拷贝清单加上 `assets/img/` 之前红过一条
   （`MISS css/game.css → ../assets/img/paper-256.png`，rc=1）—— 那正是"CI 全绿而线上缺图"的形状。
