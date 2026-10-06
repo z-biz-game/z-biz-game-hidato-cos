@@ -23,12 +23,11 @@ jobs:
       # 换来的是"网络抖一下 main 就红"。
       # 本仓的浏览器闸代码也在 tools/ 里，而且两种模块形状并存：
       # tools/scenarios.js 是 ES module（package.json type=module 让 node --check 按 ESM 解析它），
-      # tools/playtest.cjs 是 CJS。两条通配都要写上，漏一条就是那条文件从此没人检语法。
+      # tools/playtest.cjs 是 CJS。这两条通配以前在 CI 里各抄了一遍（外加一行 node --check
+      # server.cjs），和本地 npm run check 是两份独立漂的抄本；现在集合只住在 leg 里，
+      # 这一步只调它——本地绿即这一步绿，加文件只改一处。
       - name: Syntax check every source
-        run: |
-          for f in $(git ls-files 'js/*.js' 'js/*/*.js'); do node --check "$f" || exit 1; done
-          for f in $(git ls-files 'tools/*.mjs' 'tools/*.cjs' 'tools/*.js'); do node --check "$f" || exit 1; done
-          node --check server.cjs
+        run: npm run check
 
       # 分层不变量：js/ 要发给浏览器，tools/ 不发。运行时模块 import tools/ 要么是线上 404，
       # 要么是拿 bench 代码当产品代码 —— 那下面任何一道闸都不再是"出货的那份代码"。
