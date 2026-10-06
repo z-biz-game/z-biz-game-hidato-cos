@@ -11,7 +11,7 @@
     "test": "node tools/rule-test.mjs && node tools/pencil-test.mjs && SAMPLES=12 node tools/balance.mjs",
     "portcheck": "node tools/port-check.mjs",
     "balance": "SAMPLES=60 node tools/balance.mjs",
-    "check": "for f in $(find js tools -name '*.js' -o -name '*.mjs'); do node --check \"$f\" || exit 1; done && node --check server.cjs && echo OK",
+    "check": "for f in $(find js tools -name '*.js' -o -name '*.mjs'); do node --check \"$f\" || exit 1; done && node --check server.cjs && node --check \"tools/playtest.cjs\" && echo OK",
     "deploy-set": "node tools/deploy-set.mjs",
     "deploy-set:selftest": "node tools/deploy-set-selftest.mjs"
   },
