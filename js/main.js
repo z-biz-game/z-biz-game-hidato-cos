@@ -583,19 +583,6 @@ dom.clear.addEventListener('click', () => {
  * 题面级的 app.proof / app.proven 特意**不**碰：它们是这一**道题**的验收凭证，
  * 同题重开凭证照旧成立；擦掉它等于谎称"这道盘没验过"。
  */
-function restart() {
-  const g = app.game;
-  if (!g) return null;
-  g.resetAll();
-  app.lastHint = null;        // 上一条提示文案，属于上一局
-  app.judgeOut = null;        // 上一局点「验收」得出的结论，同理
-  dom.verdict.hidden = true;  // 判定条收起来，别把上一局的结论压在新盘上
-  paint();
-  renderReadouts();
-  renderReceipt();
-  persist();                  // 存档覆盖成本局的空盘：刷新不会又冒出走错那半局
-  return g;
-}
 dom.restart.addEventListener('click', restart);
 dom.judge.addEventListener('click', () => judgeAnswer());
 
