@@ -2,38 +2,17 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<!-- viewport-fit=cover 不是可选的：不加它 iOS 上 env(safe-area-inset-*) 恒为 0，
-     css/game.css 里那圈刘海/_home_ 条避让就成了永远不生效的死规则。 -->
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="twitter:card" content="summary">
 <title>智渡 Hidato · 数字链</title>
-<meta name="description" content="在 R×C 的格子里把 1..n 排成一条王步相邻的数字链：每一盘都由 seed 现算，裁判穷举证明过唯一解，铅笔规则证明过不猜也能推完。">
-<meta name="theme-color" content="#1b1a18">
-<meta name="color-scheme" content="light">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="智渡数字链">
-<!-- 图标：真 PNG 全套（assets/gen/gen_art.py 现生成，母题 = 一条走完 25 格的国王步链）。
-     这里曾经是 `href="data:image/svg+xml,..."` 一张空 SVG —— 那是"还没有位图时不给浏览器留
-     一个必然 404 的请求"的临时桩，位图到手就该拔掉：SVG 冒充 PNG 过不了"边长 ≥180 的真图"这条判据。 -->
-<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
-<link rel="icon" type="image/png" sizes="48x48" href="icons/favicon-48.png">
-<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="manifest" href="manifest.webmanifest">
-<!-- 社交卡：og:image 要绝对 URL（爬虫不会拿相对路径去拼本站之外的那一口）；
-     落地地址就是 ci.yml pages.yml 里那个 Pages 域名。 -->
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="智渡 Hidato">
-<meta property="og:title" content="智渡 Hidato · 数字链">
-<meta property="og:description" content="1..n 排成一条王步相邻的链；每一盘都由 seed 现算，并由裁判穷举证明过唯一解。">
-<meta property="og:image" content="https://z-biz-game.github.io/z-biz-game-hidato-cos/assets/img/og.png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://z-biz-game.github.io/z-biz-game-hidato-cos/assets/img/og.png">
+<meta name="description" content="Hidato 数字链纸面谜题：在 5×5／6×6／7×7 盘面里把 1..N 各填一次，使连续两个数落在共边或共角的相邻格上（切比雪夫距离 1，斜对可走）；每一盘都经穷举裁判证明唯一解，支持盘号复现、铅笔提示、撤销与本地存档。"><meta property="og:title" content="智渡 Hidato · 数字链"><meta property="og:description" content="Hidato 数字链纸面谜题：在 5×5／6×6／7×7 盘面里把 1..N 各填一次，使连续两个数落在共边或共角的相邻格上（切比雪夫距离 1，斜对可走）；每一盘都经穷举裁判证明唯一解，支持盘号复现、铅笔提示、撤销与本地存档。"><meta property="og:image" content="https://z-biz-game.github.io/z-biz-game-hidato-cos/icons/icon-512.png"><meta name="twitter:image" content="https://z-biz-game.github.io/z-biz-game-hidato-cos/icons/icon-512.png">
+<!-- 空 favicon：不给浏览器留一个必然 404 的请求，免得闸的 console 噪音盖掉真错误 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'/%3E">
 <link rel="stylesheet" href="css/game.css">
-<script src="js/sw-register.js"></script>
+
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
   <header>
@@ -55,7 +34,12 @@
       <button id="btn-hint" type="button">提示</button>
       <button id="btn-undo" type="button">撤销</button>
       <button id="btn-clear" type="button">清空</button>
+      <!-- 重开同一题：跟「清空」只差提示那一路的账（hints / hintStalls），但那条是承重的，
+           理由见 js/main.js 的 restart() 注释。跟「换一局」的分工：换一局是换一道新题，
+           这颗是「这题我走错了，原地重来」。 -->
+      <button id="btn-restart" type="button" title="重开同一题（R）">重开本题</button>
       <button id="btn-judge" type="button">判定</button>
+      <button type="button" id="btn-fullscreen" aria-pressed="false" title="全屏 (F)">全屏</button>
       <span class="readouts">
         <span id="stat-filled" class="stat">已填 0/0</span>
         <span id="stat-steps" class="stat">0 手</span>
@@ -128,5 +112,6 @@
   <canvas id="fx" class="fx-overlay" aria-hidden="true"></canvas>
 
   <script type="module" src="js/main.js"></script>
+  <script src="js/sw-register.js"></script>
 </body>
 </html>

@@ -23,12 +23,11 @@ jobs:
       # 换来的是"网络抖一下 main 就红"。
       # 本仓的浏览器闸代码也在 tools/ 里，而且两种模块形状并存：
       # tools/scenarios.js 是 ES module（package.json type=module 让 node --check 按 ESM 解析它），
-      # tools/playtest.cjs 是 CJS。两条通配都要写上，漏一条就是那条文件从此没人检语法。
+      # tools/playtest.cjs 是 CJS。这两条通配以前在 CI 里各抄了一遍（外加一行 node --check
+      # server.cjs），和本地 npm run check 是两份独立漂的抄本；现在集合只住在 leg 里，
+      # 这一步只调它——本地绿即这一步绿，加文件只改一处。
       - name: Syntax check every source
-        run: |
-          for f in $(git ls-files 'js/*.js' 'js/*/*.js'); do node --check "$f" || exit 1; done
-          for f in $(git ls-files 'tools/*.mjs' 'tools/*.cjs' 'tools/*.js'); do node --check "$f" || exit 1; done
-          node --check server.cjs
+        run: npm run check
 
       # 分层不变量：js/ 要发给浏览器，tools/ 不发。运行时模块 import tools/ 要么是线上 404，
       # 要么是拿 bench 代码当产品代码 —— 那下面任何一道闸都不再是"出货的那份代码"。
@@ -119,6 +118,15 @@ jobs:
         env:
           SAMPLES: "24"
         run: node tools/balance.mjs
+      # 部署集闸：按 tools/assemble-site.sh 那份清单真拷一遍产物，要求页面会去要的东西
+      # 都在里面。这一仓曾经因为清单落后于页面而线上 404 自己的 manifest/sw.js/图标，
+      # 而本地一切全绿——因为本地根本没有「按清单拷」这一步。
+      - name: Deploy set gate
+        run: node tools/deploy-set.mjs
+      # 阴性自证：每一类断言当场被打红一次，闸必须点名吃掉那一刀；写在注释里的假路径
+      # 必须不算引用。钉住的条数由这一跑证明它真的会红，不是由记性证明。
+      - name: Deploy set gate proves it can fail
+        run: node tools/deploy-set-selftest.mjs
 
       # 这里**不跑** tools/port-check.mjs：它的参照物是选型屏的输出 `_tmp-hidato-boards.tsv`，
       # 按设计放在仓外（tools/../../_tmp-hidato-boards.tsv）。本机把仓库复制到没有参照物的相对位置

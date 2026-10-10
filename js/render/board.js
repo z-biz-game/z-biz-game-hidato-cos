@@ -38,7 +38,12 @@ export class BoardView {
       el.tabIndex = -1;                                  // Tab 不在 49 个格里爬；方向键走选中态
       el.dataset.cell = String(c);
       el.dataset.value = '0';
-      el.addEventListener('click', () => this.onCell && this.onCell(c));
+      // pointerdown 而不是 click：click 要等浏览器把这次按压"确认"成点击才发，触摸上
+      // 晚 100~300ms。本仓一盘要连着点几十格，这点延迟是攒起来的手感；pointer 事件还
+      // 把鼠标/触摸/笔统一成一条路。前提是 css 里 .board 已有 touch-action: manipulation
+      // （touch-action 沿祖先链取交集，所以覆盖到每一格）——没有它，手指被判成滚动时
+      // pointerdown 压根不落在这格上，换事件只是换一种坏法。两条必须一起在。
+      el.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onCell && this.onCell(c); });
       this.board.append(el);
       this.cells.push(el);
     }
@@ -54,7 +59,7 @@ export class BoardView {
       b.textContent = String(v);
       b.dataset.value = String(v);
       b.setAttribute('aria-pressed', 'false');
-      b.addEventListener('click', () => this.onNumber && this.onNumber(v));
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onNumber && this.onNumber(v); });
       this.palette.append(b);
       this.buttons.push(b);
     }

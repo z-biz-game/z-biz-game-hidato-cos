@@ -1,42 +1,56 @@
 'use strict';
-// Service worker · 智渡 Hidato
+// 离线可用 + 永不被旧缓存钉住。
 //
-// 两条口径钉在这里，都是本组织踩过的坑：
-//   1. **缓存名带版本号**，activate 时把不是当前版本的桶整批删掉。不留版本号 = 改了代码
-//      还住在旧缓存里，玩家永远拿到同一份旧 js。
-//   2. **同源子资源一律网络优先，失败才退缓存**。反例是 cache-first + 手工 VERSION 号：
-//      版本号忘了 bump 就把 js/css 永久钉死在旧版，出新 HTML 配旧 JS 的鬼状态比断网更难受。
-//      网络优先的代价是首字节慢一点，换来的是"线上是什么就是什么"。
-//   3. 导航请求（打开页面本身）在离线时回落到缓存里的 index.html —— 盘是 seed 的纯函数，
-//      引擎全在本地，所以离线打开是**真能玩**的，不是给玩家看一张离线空壳。
-const VERSION = 'hidato-v1';
-const SHELL = ['index.html', 'css/game.css', 'js/main.js', 'manifest.webmanifest'];
+// 两条实测换来的口径：
+//   1) 一律 **网络优先**，命中网络才回填缓存。手工 VERSION + cache-first 的组合，
+//      发出去的 HTML 会配上上一版的 js/css，出一个"新界面配旧逻辑"的鬼状态，
+//      而且玩家自己无法恢复（只能等缓存过期）。
+//   2) 缓存名带版本号（activate 时清掉非本版的名字）。改版**不需要**同步 bump：
+//      同名文件重绘之后，网络优先这一条保证客户端下一次联网就拿到新字节。
+const VERSION = 'hidato-cos-v1';
+const CACHE = `${VERSION}-shell`;
+const PRECACHE = ['index.html', 'manifest.webmanifest'];
 
 self.addEventListener('install', (ev) => {
-  ev.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // 首屏两件套先抓下来：断网时至少能打开界面，而不是浏览器的错误页。
+  ev.waitUntil(
+    caches.open(CACHE).then((c) => c.addAll(PRECACHE).catch(() => {})).then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (ev) => {
-  ev.waitUntil(caches.keys().then((keys) => Promise.all(
-    keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))
-  )).then(() => self.clients.claim()));
+  ev.waitUntil(
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => !k.startsWith(VERSION)).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
 });
 
 self.addEventListener('fetch', (ev) => {
   const req = ev.request;
   if (req.method !== 'GET') return;
-  let url;
-  try { url = new URL(req.url); } catch { return; }
-  if (url.origin !== self.location.origin) return;      // 第三方一律不接管
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+
   ev.respondWith(
-    fetch(req).then((res) => {
-      // 只有 200 才回填：把 404/500 存进桶里，等于把一次网络抖钉成永久故障。
-      if (res && res.ok) {
-        const copy = res.clone();
-        caches.open(VERSION).then((c) => c.put(req, copy)).catch(() => {});
-      }
-      return res;
-    }).catch(() => caches.match(req).then((hit) => hit
-      || (req.mode === 'navigate' ? caches.match('index.html') : Response.error())))
+    fetch(req)
+      .then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(async () => {
+        const hit = await caches.match(req);
+        if (hit) return hit;
+        // 导航请求（地址栏/刷新/桌面图标）离线时回落到缓存的那份壳，不白屏。
+        if (req.mode === 'navigate') {
+          const shell = await caches.match('index.html');
+          if (shell) return shell;
+        }
+        return Response.error();
+      })
   );
 });

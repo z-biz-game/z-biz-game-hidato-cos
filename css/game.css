@@ -101,6 +101,10 @@ code, kbd { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .palette-wrap[hidden] { display: none; }
 .palette { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; }
 .palette[hidden] { display: none; }
+/* 数字面板是 .board 的兄弟节点，拿不到 .board 上那条 touch-action（touch-action 沿
+   祖先链取交集，不跨兄弟）。面板按钮现在走 pointerdown，所以这里必须自己补一条：
+   否则手指按在数字上被判成滚动时 pointerdown 不触发，按下去没反应。 */
+.palette { touch-action: manipulation; }
 .num {
   min-height: 44px; padding: 4px 2px; cursor: pointer;   /* 44px 是指尖目标的底线：面板是落子的地方，不比格子小 */
   font: 600 15px/1 ui-sans-serif, system-ui, sans-serif;
@@ -222,4 +226,41 @@ body.paused .palette { opacity: .38; }
   .board { --cell: min(46px, calc((100vw - 38px - (var(--cols, 5) - 1) * var(--gap)) / var(--cols, 5))); }
   :root { --gap: 3px; }
   .board-wrap { gap: 10px; }
+}
+
+/* 中央分发：safe-area 兜底 */
+
+/* ---------- safe-area：刘海与主屏条不吃掉按钮（中央分发，akari-cos 同口径） ---------- */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+}
+html, body {
+  padding-left: var(--sal);
+  padding-right: var(--sar);
+}
+body {
+  padding-top: var(--sat);
+  padding-bottom: var(--sab);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+/* 贴边的固定/吸底元素自己让开主屏条，别让 home indicator 压住按钮 */
+.fixed-bottom, .bottom-bar, .hud-bottom, footer.app-footer {
+  padding-bottom: calc(var(--sab) + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---------- 减弱动效（prefers-reduced-motion）---------- */
+/* 本仓当前**没有**可减的装饰性动效：全部时序代码只有 button:hover / .num:hover 的颜色瞬切，没有 transition 也没有 @keyframes
+   剩下的 :hover 颜色瞬切与 focus 轮廓是状态反馈，不是动效，动了反而更难用。 */
+@media (prefers-reduced-motion: reduce) {
+  /* 当下这三条不命中任何东西；写在这里是为了将来有人加动画/过渡时自动被归零，
+     而不必再想起来补这一段。颜色、透明度、命中区、focus 轮廓一律不动。 */
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

@@ -110,7 +110,11 @@ const addCheck = (name, ok, detail) => { checks.push({ name, ok, detail }); cons
 
 const PROD_KINDS = new Set(['carve', 'final', 'ship']);      // QA 复核(kind='confirm')不进定价池
 const per = {};
-const fails = { path: 0, cert: 0, ladder: 0, ship: 0, other: 0 };
+const fails = { path: 0, cert: 0, ladder: 0, ship: 0, other: 0,
+  // cert 失败按**哪个闸**掐的分账。同一句 "cert 失败" 背后是两件处置完全不同的事：
+  // 归因 ms = 这台机器的钟（红线 G2 必须在同一次 run 一起红），归因 nodes / 没被掐 =
+  // 题面或裁判坏了，当场查。不分开写，读日志的人只能看见一个数、不知道去查哪一头。
+  certBy: { ms: 0, nodes: 0, 'not-stopped': 0 } };
 const wallAll = [];
 
 for (const tier of TIERS) {
@@ -121,7 +125,7 @@ for (const tier of TIERS) {
     lockedRedundant: 0, sound: 0, stopped: 0, stopByKind: { carve: 0, final: 0, ship: 0 },
     // 击穿是被**哪个闸**掐的：'nodes' 掐的只让盘更密（纯函数读数），'ms' 掐的会让同一个 seed 串
     // 在慢机器上出另一张盘 —— 那才是"确定性"破口。两者必须分开记，混成一个数就都读不出来。
-    stopByCap: { nodes: 0, ms: 0, unknown: 0 }, keptByBudget: 0, rhoBad: 0,
+    stopByCap: { nodes: 0, ms: 0, unknown: 0 }, stoppedDropped: 0, keptByBudget: 0, rhoBad: 0,
     callsPerBoard: [], callMs: [], callNodes: [],
     draws: [], shipGivens: [], certGivens: [], rungIdx: [], steps: [], rho: [], regress: [],
     shipRefMs: [], wall: [], wallWithCert: [], shipCells: tier.n, witness: [], zeroBranch: 0,
@@ -142,7 +146,26 @@ for (const tier of TIERS) {
       else if (String(out.fail).startsWith('cert-')) fails.cert++;
       else if (String(out.fail).startsWith('ship-')) fails.ship++;
       else fails.other++;
-      console.log(`  ${tier.key}#${i} 出货失败 fail=${out.fail} —— 一张都不许放过`);
+      const by = out.board && out.board.ref ? out.board.ref.stoppedBy : null;
+      if (String(out.fail).startsWith('cert-')) fails.certBy[by || 'not-stopped']++;
+      // 这张盘被这台机器丢掉了，它的击穿归因还得进账。G2 审的是"有没有一次判定被毫秒掐掉"，
+      // 而恰恰是被毫秒掐掉的那张盘在这里 continue —— 只在出货成功的盘上数归因，等于这条红线
+      // 结构上看不到自己唯一要抓的事件（慢钟台架 duration×3 复现：A 打「cert 失败 1」的同一次
+      // run，G2 照样打「msCap 0 次」，红线绿着而盘已经少了一张）。
+      // 只数归因，不把被掐停的半截 ms 读数喂进定价分位表：那是机器的读数不是题面的读数，
+      // budgetMs 由 p95 定价，掺进截断值等于把预算钉在自己的假象上。
+      for (const c of calls) {
+        if (!PROD_KINDS.has(c.kind) || c.outcome !== 'stopped') continue;
+        rec.stopped++;
+        if (c.kind in rec.stopByKind) rec.stopByKind[c.kind]++;
+        rec.stopByCap[c.by === 'nodes' || c.by === 'ms' ? c.by : 'unknown']++;
+        rec.stoppedDropped++;
+      }
+      // G3 的第二条独立记账（carveIrreducible 自己数探针）必须一起跟上：两边各丢同一张盘时，
+      // 那条"相等"是恒等的，谁也不会响。
+      if (out.board) rec.keptByBudget += out.board.keptByBudget;
+      console.log(`  ${tier.key}#${i} 出货失败 fail=${out.fail}` + (by ? ` 归因=${by}` : '') +
+        ` —— 一张都不许放过`);
       continue;
     }
     rec.ok++;
@@ -212,7 +235,8 @@ for (const tier of TIERS) {
   }
   const t = (a) => `中位 ${f2(quant(a, 0.5))} / p95 ${f2(quant(a, 0.95))} / max ${f2(Math.max(...a))}`;
   console.log(`  出货 ${rec.ok}/${SAMPLES} · 生产路径裁判调用共 ${rec.callsPerBoard.reduce((s, x) => s + x, 0)} 次（每盘 ${t(rec.callsPerBoard)}）· 单次 ms ${t(rec.callMs)} · 节点 ${t(rec.callNodes)}`);
-  console.log(`  击穿 ${rec.stopped} 次：按调用 ${JSON.stringify(rec.stopByKind)} · 按闸 ${JSON.stringify(rec.stopByCap)} · keptByBudget（第二条独立记账）${rec.keptByBudget}`);
+  console.log(`  击穿 ${rec.stopped} 次：按调用 ${JSON.stringify(rec.stopByKind)} · 按闸 ${JSON.stringify(rec.stopByCap)} · keptByBudget（第二条独立记账）${rec.keptByBudget}` +
+    (rec.stoppedDropped ? ` · 其中 ${rec.stoppedDropped} 次来自没出货的盘（归因照数，ms/节点读数不进定价池）` : ''));
   console.log(`  线索数 不可约 ${t(rec.certGivens)} → 出货 ${t(rec.shipGivens)} = 出货占格 ${f2(100 * mean(rec.shipGivens) / tier.n, 1)}%`);
   console.log(`  密度梯 层数 ${t(rec.steps)} · 出货层号 ${t(rec.rungIdx)} · draws ${t(rec.draws)}`);
   console.log(`  出货层裁判 ms ${t(rec.shipRefMs)} · 整盘生产墙钟（含 QA 复核）中位 ${f2(quant(rec.wall, 0.5))} / p95 ${f2(quant(rec.wall, 0.95))} / max ${f2(Math.max(...rec.wall))} ms · 不含 QA ${t(rec.wallWithCert)}`);
@@ -239,7 +263,10 @@ const nOk = sum('ok');
 const failTotal = fails.path + fails.cert + fails.ladder + fails.ship + fails.other;
 
 addCheck('A 出货唯一性', sum('notUnique') === 0 && fails.cert === 0 && fails.ship === 0,
-  `非唯一 ${sum('notUnique')} · cert 失败 ${fails.cert} · ship 失败 ${fails.ship}（出货 ${nOk} 张）`);
+  `非唯一 ${sum('notUnique')} · cert 失败 ${fails.cert}` +
+  `（按闸分账 ms ${fails.certBy.ms} · nodes ${fails.certBy.nodes} · 没被掐 ${fails.certBy['not-stopped']}：` +
+  `ms 那一头是这台机器的钟，同一次 run 的 G2 必须一起红，治法是按第 4 节的口径重测尾巴；` +
+  `nodes 或"没被掐"是题面/裁判，当场查）· ship 失败 ${fails.ship}（出货 ${nOk} 张）`);
 addCheck('B 答案独立合法', sum('badSolution') === 0, `裁判解过 verifyNumbering 失败 ${sum('badSolution')}`);
 addCheck('C 零猜测承诺（独立重跑 BASIC）', sum('notPencilSolvable') === 0,
   `BASIC 推不完的出货盘 ${sum('notPencilSolvable')}/${nOk}`);
