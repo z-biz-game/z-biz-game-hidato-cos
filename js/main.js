@@ -20,6 +20,10 @@ import { TIERS, tierOf } from './engine/generate.js';
 import { BoardView, measure } from './render/board.js';
 import { Game, assessBoard, boardIsProven, makeBoard } from './ui/game.js';
 import { SAVE_KEY, clear as clearSave, decodeEntries, encodeEntries, load, save } from './store.js';
+// 听觉与触觉这两路反馈：视觉与数值之外，桌面上还该有"听得见"的一路。
+// 音频模块自己管手势解锁与真静音（suspend），这里只管把音接到真实事件上。
+import { audio } from './audio.js';
+import { haptics } from './haptics.js';
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -33,7 +37,7 @@ const dom = {
 
 const app = {
   game: null, proof: null, view: new BoardView(dom.board, dom.palette),
-  proven: false, saveOk: true, rejected: null, lastHint: null, judgeOut: null,
+  proven: false, saveOk: true, rejected: null, lastHint: null, judgeOut: null, judgeSig: null,
 };
 
 const DEFAULT_TIER = TIERS[0].key;
@@ -127,24 +131,37 @@ function renderReceipt() {
 }
 
 // ── 判定：把玩家自己写的编号交给 rules.verifyNumbering ────────────────────────
+//
+// 声音接在判定上：填满且成立 → win；填满但不成立 → lose（这一盘走错了，
+// 是本仓唯一的失败信号）；还没填满就判 → wrong（判不了，不是错）。
+// 同一结论不重响：连点两次「判定」只响一次，别把同一个事实说两遍。
 function judgeAnswer() {
   const g = app.game;
   if (!g) return null;
   const out = g.judge();
+  const sig = `${out.complete}/${out.ok}/${out.verdict}`;
+  const fresh = sig !== app.judgeSig;
+  app.judgeSig = sig;
   app.judgeOut = out;
   dom.verdict.hidden = false;
   dom.verdict.classList.remove('ok', 'bad');
   if (!out.complete) {
     dom.verdict.textContent = `还有 ${out.missing} 格没写，判不了（引擎：${out.verdict}）。断边 ${out.broken} 处。`;
     dom.verdict.classList.add('bad');
+    if (fresh) audio.play('wrong');
   } else if (!out.ok) {
     dom.verdict.textContent = `不成立 · 引擎理由 ${out.verdict}`;
     dom.verdict.classList.add('bad');
+    if (fresh) audio.play('lose');
   } else {
     dom.status.textContent = `完成 · ${g.label} · 盘号 ${g.seed} · ${g.steps} 手 · ${g.hints} 次提示`;
     dom.verdict.textContent = `1..${g.n} 是一条王步相邻的链，且每个数各占一格 —— 全部 ${g.board.clueCount} 条题面数为真。` +
       `这盘的解被裁判穷举证明过唯一（${app.proof && app.proof.outcome}），所以你写出来的就是那一盘。`;
     dom.verdict.classList.add('ok');
+    if (fresh) {
+      audio.play('win');
+      haptics.correct();
+    }
   }
   paint();
   renderReadouts();
@@ -203,6 +220,7 @@ function openBoard(tierKey, seed, restore) {
   app.proven = boardIsProven(made.board, made.proof);
   app.lastHint = null;
   app.judgeOut = null;
+  app.judgeSig = null;       // 换了一局：上一局的判定结论不算数，声音也不该重复
   dom.verdict.hidden = true;
   dom.verdict.classList.remove('ok', 'bad');
   dom.tier.value = tierKey;
@@ -245,10 +263,18 @@ function afterMove() {
 }
 
 // ── 真指针与键盘 ─────────────────────────────────────────────────────────────
+//
+// 声音接在这两条路径上，因为它们是本仓仅有的两条落子路径：
+//   · 点一格 = 选中 → tap
+//   · 按一个数字写进选中格 → 写进去了 correct / 被拒 wrong
+//   · 方向键移动选中格 → move
+//   · ±改格里的值、⌫清格 → 同样是"写了/清了"：按引擎给的结论给 correct / wrong
 app.view.onCell = (cell) => {
   const g = app.game;
   if (!g) return;
   g.select(cell);                        // 交互模型只有一种：点格 = 选中
+  audio.play('tap');
+  haptics.tap();
   app.lastHint = null;
   g.clearHint();
   paint();
@@ -260,11 +286,15 @@ app.view.onNumber = (v) => {
   const res = g.press(v);
   if (!res.ok) {
     app.lastHint = { text: WHY[res.why] || `这一步没写进去（${res.why}）` };
+    audio.play('wrong');
+    haptics.wrong();
     paint();
     renderReadouts();
     return;
   }
   dom.verdict.hidden = true;
+  audio.play('correct');                 // 一次有效操作成功：数写进去了
+  haptics.correct();
   afterMove();
   if (g.filled() === g.n) judgeAnswer();
 };
@@ -274,14 +304,14 @@ function onKey(ev) {
   const t = ev.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
   const k = ev.key;
-  let moved = false, handled = true;
+  let moved = false, handled = true, res = null;
   if (k === 'ArrowLeft') { g.move(0, -1); moved = true; }
   else if (k === 'ArrowRight') { g.move(0, 1); moved = true; }
   else if (k === 'ArrowUp') { g.move(-1, 0); moved = true; }
   else if (k === 'ArrowDown') { g.move(1, 0); moved = true; }
-  else if (k === '+' || k === '=') g.nudge(1);
-  else if (k === '-' || k === '_') g.nudge(-1);
-  else if (k === 'Backspace' || k === 'Delete') g.erase();
+  else if (k === '+' || k === '=') res = g.nudge(1);
+  else if (k === '-' || k === '_') res = g.nudge(-1);
+  else if (k === 'Backspace' || k === 'Delete') res = g.erase();
   // R 重开同一题。本仓原先没有任何键占着字母：方向键走格，+/- 调 armed，⌫/Del 擦格，
   // 所以 R 是空的，不需要挪别的键。重开在**局中就能按**，不只盘填满后 ——
   // 玩家走到一半发现这条链子走错了，当场 R 一下原地重来，不必先填满再重来。
@@ -289,7 +319,19 @@ function onKey(ev) {
   else handled = false;
   if (!handled) return;
   ev.preventDefault();                     // 方向键不许滚页，⌫ 不许退历史
-  if (moved) { paint(); renderReadouts(); return; }
+  if (moved) {
+    audio.play('move');                    // 光标挪了一格
+    paint(); renderReadouts();
+    return;
+  }
+  // 这一步写了值或清了格：引擎给了 ok / why，就按它给声。
+  if (res && res.ok === false) {
+    audio.play('wrong');
+    haptics.wrong();
+  } else {
+    audio.play('correct');
+    haptics.correct();
+  }
   dom.verdict.hidden = true;
   afterMove();
 }
@@ -305,6 +347,7 @@ dom.hint.addEventListener('click', () => {
   const g = app.game;
   if (!g) return;
   app.lastHint = g.hint();
+  audio.play('move');              // 提示：只高亮一格，不代写
   paint();
   renderReadouts();
   renderReceipt();
@@ -313,12 +356,14 @@ dom.hint.addEventListener('click', () => {
 dom.undo.addEventListener('click', () => {
   const g = app.game;
   if (!g) return;
+  audio.play('move');              // 撤销：盘面退了一步
   g.undo();
   afterMove();
 });
 dom.clear.addEventListener('click', () => {
   const g = app.game;
   if (!g) return;
+  audio.play('move');              // 清空：盘面退了回去
   g.clearAll();
   app.lastHint = null;
   dom.verdict.hidden = true;
@@ -342,6 +387,7 @@ dom.clear.addEventListener('click', () => {
 function restart() {
   const g = app.game;
   if (!g) return null;
+  audio.play('move');        // 重开：盘面整个归零（题面不动），这一路也退一步
   g.resetAll();
   app.lastHint = null;        // 上一条提示文案，属于上一局
   app.judgeOut = null;        // 上一局点「验收」得出的结论，同理
@@ -621,3 +667,26 @@ if (document.readyState === 'loading') {
 } else {
   bootFullscreen();
 }
+
+// ---- 音效开关（#btn-sound）----
+//
+// 静音走 `audio.setMuted(true)`，那是 `ctx.suspend()`：整个 AudioContext 挂起。
+// **不许**改成像"把 master.gain 拧到 0"那样 —— 只拧 gain 是假静音：节点照建、时钟照跑，
+// 取消静音之后还有一截尾巴在响。真正的静音必须是挂起整个上下文。
+//
+// 按钮找不到就不装（和全屏那一条同一条纪律）：留一串没人按的代码等于没做这个功能。
+(function bindSound() {
+  const btn = document.getElementById('btn-sound');
+  if (!btn) return;
+  function paint() {
+    const on = !audio.muted;
+    btn.setAttribute('aria-pressed', String(on));
+    btn.textContent = on ? '音效：开' : '音效：关';
+    btn.title = on ? '点击关闭音效' : '点击开启音效';
+  }
+  btn.addEventListener('click', () => {
+    audio.setMuted(!audio.muted);
+    paint();
+  });
+  paint();
+})();
