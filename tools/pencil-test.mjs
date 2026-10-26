@@ -96,11 +96,14 @@ const giv = (x) => countGivens(x.given);
 // 同一串 seed 在慢机器上 carve 探针会放回的线索不同、证书裁判也会更晚撞闸。这种缺席只允许一种处置——
 // **不算证人，也不当证据用**，页面遇到同一种盘是拒收（js/ui/game.js 的 boardIsProven）。
 // 但缺席不能没有上限，否则一台什么都证不完的机器反而"没有样本可失败"。上限是每档至多 floor(SAMPLES/4) 张。
-const IRR = [], SHIP = [], STARVED = [];
+const IRR = [], SHIP = [], STARVED = [], SHIPSTARVED = [];
 // 三种去向分开记账，逐档闭合：入池 / 被这台机器的钟赦掉 / 红掉。审计者的输入集合必须等于生产者的
 // 抽样数——闭合式里漏一种去向，就会在"有一张盘被悄悄丢掉"的时候反而报出"计数不闭合"的假话。
 const TALLY = TIERS.map((t) => ({ key: t.key, irr: 0, starved: 0, failed: 0 }));
 const tally = (key, what) => { TALLY.find((x) => x.key === key)[what]++; };
+// 出货盘（generate）那一路也有同一支 ms 闸（出货裁判 + 不可约复核），所以它也要一套同样的三去向账。
+const SHIP_TALLY = TIERS.map((t) => ({ key: t.key, ship: 0, starved: 0, failed: 0 }));
+const shipTally = (key, what) => { SHIP_TALLY.find((x) => x.key === key)[what]++; };
 const maxStarved = Math.floor(SAMPLES / 4);
 for (const tier of TIERS) {
   const G = gridFor(tier);
@@ -125,8 +128,24 @@ for (const tier of TIERS) {
       console.log(`  ${starved ? 'STARVED' : 'FAIL'} ${line}`);
     }
     const g = generate(tier.key, 4000 + i);
-    if (g.ok) SHIP.push({ tier, G, given: g.ship.given, sol: g.solution, seed: g.seed });
-    else { fails++; checks++; console.log(`  FAIL generate ${tier.key}#${4000 + i} :: ${g.fail}`); }
+    if (g.ok) { SHIP.push({ tier, G, given: g.ship.given, sol: g.solution, seed: g.seed }); shipTally(tier.key, 'ship'); }
+    else {
+      checks++;
+      // 出货盘这条腿里跑的**也是**同一支 ms 闸（出货裁判 + 不可约复核，见 engine/generate.js 的
+      // `nodeCap: tier.nodeCap, msCap: tier.budgetMs`）。它掐停的含义与证书盘那条腿一模一样：
+      // 是这台机器的钟，不是这张题面的形状。所以只赦同一种形状 —— 归因=ms 且读数确实大于该档预算；
+      // cert-multiple / cert-none / ladder / 归因=nodes 一律照旧红，那是引擎的事，与快慢无关。
+      // 不赦的话这道闸会按机器负载随机翻红（实测同一份代码在不同负载下 4003 这张时红时绿），
+      // 那样的红不指向任何可修的东西。
+      const r = g.board && g.board.ref;
+      const line = `generate ${tier.key}#${4000 + i} :: ${g.fail}` +
+        (r ? ` · 归因=${r.stoppedBy} nodes=${r.nodes} ms=${r.ms.toFixed(2)}` : '') +
+        ` · 预算 nodeCap=${tier.nodeCap}/msCap=${tier.budgetMs}`;
+      const starved = /^(cert|ship)-stopped$/.test(String(g.fail)) && !!r && r.stoppedBy === 'ms' && r.ms > tier.budgetMs;
+      if (starved) { SHIPSTARVED.push({ tier: tier.key, i: 4000 + i, ms: r.ms, nodes: r.nodes }); shipTally(tier.key, 'starved'); }
+      else { fails++; shipTally(tier.key, 'failed'); }
+      console.log(`  ${starved ? 'STARVED' : 'FAIL'} ${line}`);
+    }
   }
 }
 // 取样计数必须闭合：入池 + 被赦的缺席 + 红掉的 = 抽样数。对不上就是"有一张盘没打印过就被丢掉了"，
@@ -147,8 +166,25 @@ for (const row of TALLY) {
     console.log(`  ok   证书盘取样闭合 ${row.key} :: 入池 ${row.irr} + 这台机器证不完 ${starved} + 红掉 ${row.failed} = 抽样 ${SAMPLES} · 饿的上限 ${maxStarved}`);
   }
 }
+// 出货盘那条腿同样的两条：先闭合，再封顶。
+for (const row of SHIP_TALLY) {
+  checks++;
+  if (row.ship + row.starved + row.failed !== SAMPLES) {
+    fails++;
+    console.log(`  FAIL 出货盘取样计数不闭合 ${row.key} :: 入池 ${row.ship} + 证不完 ${row.starved} + 红掉 ${row.failed} ≠ 抽样 ${SAMPLES}（差额那张连一行都没打印过）`);
+  }
+  checks++;
+  if (row.starved > maxStarved) {
+    fails++;
+    console.log(`  FAIL 出货盘被这台机器的钟饿得太多 ${row.key} :: 证不完 ${row.starved} > 上限 ${maxStarved}（=floor(SAMPLES/4)）。` +
+      `这一档在这台机器上已经没有出货样本可言——按口径**在这台机器上**重测尾巴再回填 budgetMs，别把上限调大`);
+  } else {
+    console.log(`  ok   出货盘取样闭合 ${row.key} :: 入池 ${row.ship} + 这台机器证不完 ${row.starved} + 红掉 ${row.failed} = 抽样 ${SAMPLES} · 饿的上限 ${maxStarved}`);
+  }
+}
 const POOL = IRR.concat(SHIP);
-console.log(`样本：不可约证书盘 ${IRR.length} 张（${TIERS.map((t) => `${t.key} ${IRR.filter((x) => x.tier.key === t.key).length}`).join(' · ')}）+ 出货盘 ${SHIP.length} 张 = ${POOL.length} 张`);
+console.log(`样本：不可约证书盘 ${IRR.length} 张（${TIERS.map((t) => `${t.key} ${IRR.filter((x) => x.tier.key === t.key).length}`).join(' · ')}）+ 出货盘 ${SHIP.length} 张 = ${POOL.length} 张` +
+  (SHIPSTARVED.length ? `（另有 ${SHIPSTARVED.length} 张出货盘被这台机器的 ms 闸赦掉，不当证据用）` : ''));
 console.log('');
 
 // ── §1 soundness：每条结论都落在裁判的真解上 ───────────────────────────────

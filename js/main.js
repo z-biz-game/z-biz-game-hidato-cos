@@ -19,9 +19,12 @@
 import { TIERS, tierOf } from './engine/generate.js';
 import { BoardView, measure } from './render/board.js';
 import { FxLayer } from './render/fx.js';
-import { Sfx } from './audio.js';
 import { Game, assessBoard, boardIsProven, makeBoard } from './ui/game.js';
 import { SAVE_KEY, clear as clearSave, decodeEntries, encodeEntries, load, save } from './store.js';
+// 听觉与触觉这两路反馈：视觉与数值之外，桌面上还该有"听得见"的一路。
+// 音频模块自己管手势解锁与真静音（suspend），这里只管把音接到真实事件上。
+import { audio } from './audio.js';
+import { haptics } from './haptics.js';
 
 const $ = (id) => document.getElementById(id);
 const dom = {
@@ -38,9 +41,8 @@ const dom = {
 
 const app = {
   game: null, proof: null, view: new BoardView(dom.board, dom.palette),
-  proven: false, saveOk: true, rejected: null, lastHint: null, judgeOut: null,
-  fx: null, sfx: new Sfx(), paused: false, helpOpen: false, fullscreen: false,
-  unlocked: false,            // AudioContext 只在**第一次真手势**之后才建（autoplay 策略）
+  proven: false, saveOk: true, rejected: null, lastHint: null, judgeOut: null, judgeSig: null,
+  fx: null, paused: false, helpOpen: false, fullscreen: false,
   tapCell: -1,                // pointerdown → click 的同一次点按去重令牌（下一帧清）
   restartLog: null,           // 重开前后的复位读数（时钟/步数/粒子/涟漪/链段/手数/已填）
   reduceMotionQuery: null,
@@ -125,17 +127,27 @@ function syncFx() {
   fx.setGlow(centerOf(app.game.sel));
 }
 
-// ── HUD 动作（每个都真改状态，读数交给 app.restartLog / fx.stats / sfx.stats）────
+// ── HUD 动作（每个都真改状态，读数交给 app.restartLog / fx.stats / audioStats）────
+/**
+ * 音频读数。`js/audio.js` 的单例只对外暴露"解没解锁、静不静音"两个状态，
+ * 不再有旧的 Sfx 计数器（voices / blocked / ctxState）—— 回执与 HUD 都从这里取，
+ * 免得念出 undefined。
+ */
+function audioStats() {
+  return {
+    unlocked: audio.unlocked ? 1 : 0,
+    muted: audio.muted ? 1 : 0,
+  };
+}
 function renderHud() {
   if (!dom.hudNote) return;
   const bits = [];
   if (app.paused) bits.push('已暂停 · 按 P 或点「暂停」继续');
-  if (dom.mute) dom.mute.setAttribute('aria-pressed', app.sfx.muted ? 'true' : 'false');
+  if (dom.mute) dom.mute.setAttribute('aria-pressed', audio.muted ? 'true' : 'false');
   if (dom.pause) dom.pause.setAttribute('aria-pressed', app.paused ? 'true' : 'false');
   if (dom.help) dom.help.setAttribute('aria-pressed', app.helpOpen ? 'true' : 'false');
   if (dom.full) dom.full.setAttribute('aria-pressed', app.fullscreen ? 'true' : 'false');
-  const st = app.sfx.stats();
-  if (st.contextOpen) bits.push(`音效 ${st.voices} 个音${app.sfx.muted ? '（静音中·挂起）' : ''}`);
+  if (audio.unlocked) bits.push(`音效${audio.muted ? '（静音中·挂起）' : ''}`);
   dom.hudNote.textContent = bits.join(' · ');
   dom.hudNote.classList.toggle('busy', app.paused);
 }
@@ -154,25 +166,24 @@ function togglePause() { return setPaused(!app.paused); }
 function restart() {
   const g = app.game;
   if (!g) return null;
-  const before = { ...app.fx.stats(), steps: g.steps, filled: g.filled(), sfxVoices: app.sfx.voices };
+  const before = { ...app.fx.stats(), steps: g.steps, filled: g.filled(), audio: audioStats() };
   setPaused(false);
   app.fx.reset();
-  app.sfx.reset();
   app.fx.setLinks([]);
   app.fx.setGlow(null);
   const opened = openBoard(g.tierKey, g.seed, null);     // restore=null ⇒ 不读存档，从空盘开始
-  const after = { ...app.fx.stats(), steps: app.game ? app.game.steps : 0, filled: app.game ? app.game.filled() : 0, sfxVoices: app.sfx.voices };
+  const after = { ...app.fx.stats(), steps: app.game ? app.game.steps : 0, filled: app.game ? app.game.filled() : 0, audio: audioStats() };
   app.restartLog = { before, after, seed: g.seed, ok: !!opened.ok };
-  app.sfx.play('lift');
+  audio.play('move');             // 重开：盘面整个归零（题面不动），这一路也退一步
   renderHud();
   return app.restartLog;
 }
 
-/** 静音：真挂起上下文；静音期间 play() 一个节点都不建（见 js/audio.js 的 blocked 计数）。 */
+/** 静音开关：走 audio.setMuted()（真挂起上下文），不再有本地 Sfx 的 toggle()。 */
 function toggleMute() {
-  const st = app.sfx.toggleMute();
+  audio.setMuted(!audio.muted);
   renderHud();
-  return st;
+  return audioStats();
 }
 
 function toggleHelp() {
@@ -208,13 +219,12 @@ function toggleFullscreen() {
 // 拒了不许冒成 unhandled rejection ⇒ 页面 console 干净也是出货的一部分。
 app.swallowDom = (p) => { if (p && typeof p.catch === 'function') p.catch((e) => { app.fullscreenError = String(e && e.message || e); }); return p; };
 
-/** 第一次真手势：建上下文（之前一个 AudioContext 都不建，autoplay 策略下那是白挨一条 warning）。 */
+/** 第一次真手势：解锁上下文（audio 单例自己幂等，重复调不重建）。 */
 function unlockAudio() {
-  if (app.unlocked) return true;
-  app.unlocked = true;
-  const ctx = app.sfx.arm();
+  const ok = audio.unlock();
+  haptics.arm();
   renderHud();
-  return !!ctx;
+  return ok;
 }
 
 
@@ -258,34 +268,45 @@ function renderReceipt() {
     `验收            ${app.proven ? '通过 · 可以出货' : '未通过 ⇒ 不作为题面发出去'}`,
   ];
   const fx = app.fx ? app.fx.stats() : null;
-  const au = app.sfx.stats();
+  const au = audioStats();
   lines.push(
-    `手感层          ${fx ? `仿真 ${fx.clock.toFixed(3)}s / ${fx.simSteps} 步 · 粒子 ${fx.live} · 涟漪 ${fx.rings} · 链段 ${fx.links} · 流动 ${fx.flow.toFixed(2)} · 冻结 ${fx.frozen}${fx.reduced ? ' · 减少动效' : ''}` : '无画布'} ｜ 音频 上下文 ${au.contextOpen} · 音色 ${au.voices} · 静音挡下 ${au.blocked} · 未解锁拒放 ${au.deferred} · suspend ${au.suspendCalls}/resume ${au.resumeCalls}`,
+    `手感层          ${fx ? `仿真 ${fx.clock.toFixed(3)}s / ${fx.simSteps} 步 · 粒子 ${fx.live} · 涟漪 ${fx.rings} · 链段 ${fx.links} · 流动 ${fx.flow.toFixed(2)} · 冻结 ${fx.frozen}${fx.reduced ? ' · 减少动效' : ''}` : '无画布'} ｜ 音频 已解锁 ${au.unlocked} · 静音 ${au.muted}`,
   );
   dom.receipt.textContent = lines.join('\n');
 }
 
 // ── 判定：把玩家自己写的编号交给 rules.verifyNumbering ────────────────────────
+//
+// 声音接在判定上：填满且成立 → win；填满但不成立 → lose（这一盘走错了，
+// 是本仓唯一的失败信号）；还没填满就判 → wrong（判不了，不是错）。
+// 同一结论不重响：连点两次「判定」只响一次，别把同一个事实说两遍。
 function judgeAnswer() {
   const g = app.game;
   if (!g) return null;
   const out = g.judge();
+  const sig = `${out.complete}/${out.ok}/${out.verdict}`;
+  const fresh = sig !== app.judgeSig;
+  app.judgeSig = sig;
   app.judgeOut = out;
   dom.verdict.hidden = false;
   dom.verdict.classList.remove('ok', 'bad');
   if (!out.complete) {
     dom.verdict.textContent = `还有 ${out.missing} 格没写，判不了（引擎：${out.verdict}）。断边 ${out.broken} 处。`;
     dom.verdict.classList.add('bad');
+    if (fresh) audio.play('wrong');
   } else if (!out.ok) {
     dom.verdict.textContent = `不成立 · 引擎理由 ${out.verdict}`;
     dom.verdict.classList.add('bad');
-    app.sfx.play('wrong');
+    if (fresh) audio.play('lose');
   } else {
     dom.status.textContent = `完成 · ${g.label} · 盘号 ${g.seed} · ${g.steps} 手 · ${g.hints} 次提示`;
     dom.verdict.textContent = `1..${g.n} 是一条王步相邻的链，且每个数各占一格 —— 全部 ${g.board.clueCount} 条题面数为真。` +
       `这盘的解被裁判穷举证明过唯一（${app.proof && app.proof.outcome}），所以你写出来的就是那一盘。`;
     dom.verdict.classList.add('ok');
-    app.sfx.play('solve');
+    if (fresh) {
+      audio.play('win');
+      haptics.correct();
+    }
     const c = centerOf(g.sel);
     if (app.fx && c) app.fx.spawnBurst(c.x, c.y);
     renderHud();
@@ -357,6 +378,7 @@ function openBoard(tierKey, seed, restore) {
   app.proven = boardIsProven(made.board, made.proof);
   app.lastHint = null;
   app.judgeOut = null;
+  app.judgeSig = null;       // 换了一局：上一局的判定结论不算数，声音也不该重复
   dom.verdict.hidden = true;
   dom.verdict.classList.remove('ok', 'bad');
   dom.tier.value = tierKey;
@@ -413,7 +435,8 @@ app.view.onCell = (cell, src) => {
   }
   unlockAudio();
   g.select(cell);                        // 交互模型只有一种：点格 = 选中
-  app.sfx.play('tap');
+  audio.play('tap');
+  haptics.tap();
   const c = centerOf(cell);
   if (app.fx && c) app.fx.spawnRing(c.x, c.y);
   app.lastHint = null;
@@ -429,7 +452,8 @@ app.view.onNumber = (v) => {
   const res = g.press(v);
   if (!res.ok) {
     app.lastHint = { text: WHY[res.why] || `这一步没写进去（${res.why}）` };
-    app.sfx.play('rub');
+    audio.play('wrong');
+    haptics.wrong();
     paint();
     renderReadouts();
     return;
@@ -437,7 +461,8 @@ app.view.onNumber = (v) => {
   const c = centerOf(g.sel);
   const linkedNeighbour = (v > 1 && g.cellHolding(v - 1) >= 0) || (v < g.n && g.cellHolding(v + 1) >= 0);
   if (app.fx && c) app.fx.spawnPlace(c.x, c.y, linkedNeighbour);
-  app.sfx.play('place');
+  audio.play('correct');                 // 一次有效操作成功：数写进去了
+  haptics.correct();
   dom.verdict.hidden = true;
   afterMove();
   if (g.filled() === g.n) judgeAnswer();
@@ -462,14 +487,14 @@ function onKey(ev) {
   const g = app.game;
   if (!g) return;
   if (app.paused) return;                // 暂停态：玩法键一个都不响应（与盘上点选同一条闸）
-  let moved = false, handled = true;
+  let moved = false, handled = true, res = null;
   if (k === 'ArrowLeft') { g.move(0, -1); moved = true; }
   else if (k === 'ArrowRight') { g.move(0, 1); moved = true; }
   else if (k === 'ArrowUp') { g.move(-1, 0); moved = true; }
   else if (k === 'ArrowDown') { g.move(1, 0); moved = true; }
-  else if (k === '+' || k === '=') g.nudge(1);
-  else if (k === '-' || k === '_') g.nudge(-1);
-  else if (k === 'Backspace' || k === 'Delete') g.erase();
+  else if (k === '+' || k === '=') res = g.nudge(1);
+  else if (k === '-' || k === '_') res = g.nudge(-1);
+  else if (k === 'Backspace' || k === 'Delete') res = g.erase();
   // R 重开同一题。本仓原先没有任何键占着字母：方向键走格，+/- 调 armed，⌫/Del 擦格，
   // 所以 R 是空的，不需要挪别的键。重开在**局中就能按**，不只盘填满后 ——
   // 玩家走到一半发现这条链子走错了，当场 R 一下原地重来，不必先填满再重来。
@@ -477,7 +502,19 @@ function onKey(ev) {
   else handled = false;
   if (!handled) return;
   ev.preventDefault();                     // 方向键不许滚页，⌫ 不许退历史
-  if (moved) { paint(); renderReadouts(); return; }
+  if (moved) {
+    audio.play('move');                    // 光标挪了一格
+    paint(); renderReadouts();
+    return;
+  }
+  // 这一步写了值或清了格：引擎给了 ok / why，就按它给声。
+  if (res && res.ok === false) {
+    audio.play('wrong');
+    haptics.wrong();
+  } else {
+    audio.play('correct');
+    haptics.correct();
+  }
   dom.verdict.hidden = true;
   afterMove();
 }
@@ -549,6 +586,7 @@ dom.hint.addEventListener('click', () => {
   const g = app.game;
   if (!g) return;
   app.lastHint = g.hint();
+  audio.play('move');              // 提示：只高亮一格，不代写
   paint();
   renderReadouts();
   renderReceipt();
@@ -557,12 +595,15 @@ dom.hint.addEventListener('click', () => {
 dom.undo.addEventListener('click', () => {
   const g = app.game;
   if (!g) return;
+  audio.play('tap');               // 撤销：盘面退了一步
+  haptics.tap();
   g.undo();
   afterMove();
 });
 dom.clear.addEventListener('click', () => {
   const g = app.game;
   if (!g) return;
+  audio.play('move');              // 清空：盘面退了回去
   g.clearAll();
   app.lastHint = null;
   dom.verdict.hidden = true;
@@ -582,8 +623,10 @@ dom.clear.addEventListener('click', () => {
  *
  * 题面级的 app.proof / app.proven 特意**不**碰：它们是这一**道题**的验收凭证，
  * 同题重开凭证照旧成立；擦掉它等于谎称"这道盘没验过"。
+ *
+ * 绑定只有上面 HUD 那一处（先 unlockAudio 再 restart）：这里再挂一遍会让一次点击
+ * 重开两次、'move' 那一声也响两遍 —— 同一个动作只许一份接线。
  */
-dom.restart.addEventListener('click', restart);
 dom.judge.addEventListener('click', () => judgeAnswer());
 
 for (const t of TIERS) {
@@ -601,7 +644,7 @@ window.hidato = {
   view: app.view,
   dom,
   fx: app.fx,
-  sfx: app.sfx,
+  audio,
   // 玩法态字符串：探针的 playFlag 靠它认"进没进关卡"。只写 playing / paused 两种取值
   //（paused 撞 MENUISH 是故意的：尺子看到暂停会自己走继续那条通道）。
   hud: { phase: 'playing' },
@@ -610,11 +653,11 @@ window.hidato = {
   stats() {
     return {
       fx: app.fx ? app.fx.stats() : null,
-      audio: app.sfx.stats(),
+      audio: audioStats(),
       paused: app.paused ? 1 : 0,
       help: app.helpOpen ? 1 : 0,
       fullscreen: app.fullscreen ? 1 : 0,
-      gesture: app.unlocked ? 1 : 0,
+      gesture: audio.unlocked ? 1 : 0,
       reduced: app.fx ? app.fx.reduceMotion ? 1 : 0 : 0,
       restart: app.restartLog,
     };
